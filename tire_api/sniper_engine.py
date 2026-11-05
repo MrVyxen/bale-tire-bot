@@ -1,8 +1,8 @@
 import asyncio
 import time
+import io
 import logging
-import cv2
-import numpy as np
+from PIL import Image
 from typing import Dict, Any, Optional
 from database import get_user, upsert_user, log_action
 from bale_api import BaleBotClient
@@ -178,10 +178,11 @@ class SniperEngine:
 
         # تست مرحله ۲: سرعت دریافت و پردازش کپچا
         t_c_start = time.perf_counter()
-        # شبیه‌سازی پردازش کپچا
-        dummy_img = np.zeros((60, 160, 3), dtype=np.uint8)
-        _, enc = cv2.imencode(".png", dummy_img)
-        FastCaptchaSolver.preprocess_image(enc.tobytes())
+        # شبیه‌سازی پردازش کپچا با PIL
+        dummy = Image.new("RGB", (160, 60), color="white")
+        buf = io.BytesIO()
+        dummy.save(buf, format="PNG")
+        FastCaptchaSolver.preprocess_image(buf.getvalue())
         t_captcha = round((time.perf_counter() - t_c_start) * 1000, 2)
 
         # تست مرحله ۳: آماده‌سازی پی‌لود هدرها

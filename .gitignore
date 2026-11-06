@@ -7,3 +7,8 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+test_*.py
+inspect_*.py
+parse_*.py
+probe_*.py
+view_*.py

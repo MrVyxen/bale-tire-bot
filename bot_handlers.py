@@ -14,20 +14,46 @@ class BaleBotHandlers:
         self.sniper = sniper
 
     @staticmethod
-    def get_main_keyboard():
+    def calculate_profile_completion(user: Dict[str, Any]) -> tuple[int, str]:
+        fields = ["national_id", "mobile", "car_plate", "car_vin", "chassis_no", "green_sheet_no"]
+        filled = sum(1 for f in fields if user.get(f))
+        pct = int((filled / len(fields)) * 100)
+        
+        # نوار پیشرفت گرافیکی شیک
+        total_blocks = 10
+        filled_blocks = int((filled / len(fields)) * total_blocks)
+        bar = "█" * filled_blocks + "░" * (total_blocks - filled_blocks)
+        return pct, f"[{bar}] {pct}%"
+
+    @classmethod
+    def get_main_keyboard(cls, user: Optional[Dict[str, Any]] = None):
+        user = user or {}
+        is_sniper_on = bool(user.get("sniper_enabled", 0))
+        sniper_btn_text = "⚡ شکارچی خودکار: 🟢 فعال و آماده" if is_sniper_on else "⚡ شکارچی خودکار: 🔴 خاموش (کلیک برای فعال‌سازی)"
+
+        pct, _ = cls.calculate_profile_completion(user)
+        profile_badge = "✅" if pct == 100 else f"({pct}%)"
+
+        cur_portal = PORTALS.get(user.get("target_portal", "barez"), {}).get("title", "بارز").split("(")[0].strip()
+        cur_size_code = user.get("target_tire_size", "185_65_14")
+        cur_size_title = TIRE_SIZES.get(cur_size_code, "185/65R14").split("(")[0].strip()
+
         return {
             "inline_keyboard": [
                 [
-                    {"text": "👤 تنظیمات مشخصات مالک و خودرو", "callback_data": "menu_profile"},
-                    {"text": "🛞 انتخاب سایز لاستیک", "callback_data": "menu_size"}
+                    {"text": sniper_btn_text, "callback_data": "menu_sniper"}
                 ],
                 [
-                    {"text": "🏢 انتخاب سامانه توزیع", "callback_data": "menu_portal"},
-                    {"text": "⚡ شکارچی خودکار (Sniper)", "callback_data": "menu_sniper"}
+                    {"text": f"👤 مدارک و خودرو {profile_badge}", "callback_data": "menu_profile"},
+                    {"text": f"🛞 سایز: {cur_size_title}", "callback_data": "menu_size"}
                 ],
                 [
-                    {"text": "🧪 تست زنده سرعت و پینگ (Benchmark)", "callback_data": "test_speed"},
-                    {"text": "📋 خلاصه اطلاعات و وضعیت", "callback_data": "view_profile"}
+                    {"text": f"🏢 سامانه: {cur_portal}", "callback_data": "menu_portal"},
+                    {"text": "⏱ بنچمارک و پینگ", "callback_data": "test_speed"}
+                ],
+                [
+                    {"text": "📊 شناسنامه نهایی من", "callback_data": "view_profile"},
+                    {"text": "📖 راهنما و ساعات فروش", "callback_data": "menu_guide"}
                 ]
             ]
         }
@@ -37,20 +63,27 @@ class BaleBotHandlers:
         if not user:
             user = await upsert_user(chat_id, username=username)
 
-        welcome_text = (
-            "🏎 <b>به بازوی ثبت‌نام فوق‌سریع لاستیک دولتی خوش آمدید!</b>\n\n"
-            "این ربات مستقیماً از طریق درخواست‌های مستقیم API و بدون اتلاف وقتِ مرورگر، "
-            "اطلاعات شما را در کسری از ثانیه (زیر ۵۰ میلی‌ثانیه) در سامانه‌های دولتی ثبت می‌کند.\n\n"
-            "🔰 <b>مراحل راه‌اندازی سریع:</b>\n"
-            "۱. از بخش <b>مشخصات مالک و خودرو</b> اطلاعات هویتی و خودرو را تکمیل کنید.\n"
-            "۲. <b>سایز تایر</b> خودروی خود را انتخاب کنید.\n"
-            "۳. <b>شکارچی خودکار (Sniper)</b> را فعال کنید تا به محض باز شدن سهمیه، ثبت نام انجام شود.\n\n"
-            "👇 لطفاً یکی از گزینه‌های زیر را انتخاب نمایید:"
+        pct, progress_bar = self.calculate_profile_completion(user)
+        sniper_st = "🟢 <b>آماده‌باش و بیدار</b>" if user.get("sniper_enabled", 0) else "⚪ <b>غیرفعال</b>"
+        portal_name = PORTALS.get(user.get("target_portal", "barez"), {}).get("title", "بارز")
+        size_name = TIRE_SIZES.get(user.get("target_tire_size", "185_65_14"), "185/65R14")
+
+        text = (
+            "🏎 <b>سامانه ثبت‌نام فوق‌سریع تایر دولتی</b>\n"
+            "<i>موتور ابری اسنایپر | اتصال مستقیم به وب‌سرویس‌های رسمی</i>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📡 <b>وضعیت شکارچی:</b> {sniper_st}\n"
+            f"🏢 <b>سامانه هدف:</b> <code>{portal_name}</code>\n"
+            f"🛞 <b>سایز و تعداد:</b> <code>{size_name}</code> (<b>{user.get('tire_count', 2)} حلقه</b>)\n"
+            f"📋 <b>تکمیل مدارک:</b> <code>{progress_bar}</code>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>جهت تضمین ثبت‌نام در لحظه بازگشایی ظرفیت‌ها، ابتدا مدارک خود را تکمیل کرده و سپس شکارچی را روشن کنید.</i>\n\n"
+            "👇 <b>یک گزینه را انتخاب کنید:</b>"
         )
         await self.bot.send_message(
             chat_id=chat_id,
-            text=welcome_text,
-            reply_markup=self.get_main_keyboard()
+            text=text,
+            reply_markup=self.get_main_keyboard(user)
         )
 
     async def handle_callback_query(self, query: Dict[str, Any]):
@@ -67,48 +100,70 @@ class BaleBotHandlers:
 
         if data == "main_menu":
             await set_state(chat_id, "IDLE")
-            text = "🏎 <b>منوی اصلی ربات ثبت‌نام فوق‌سریع تایر:</b>"
+            pct, progress_bar = self.calculate_profile_completion(user)
+            sniper_st = "🟢 <b>آماده‌باش و بیدار</b>" if user.get("sniper_enabled", 0) else "⚪ <b>غیرفعال</b>"
+            portal_name = PORTALS.get(user.get("target_portal", "barez"), {}).get("title", "بارز")
+            size_name = TIRE_SIZES.get(user.get("target_tire_size", "185_65_14"), "185/65R14")
+
+            text = (
+                "🏎 <b>داشبورد اصلی سامانه تایر دولتی</b>\n"
+                "<i>وضعیت لحظه‌ای سیستم و گزینه‌های مدیریت</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📡 <b>وضعیت شکارچی:</b> {sniper_st}\n"
+                f"🏢 <b>سامانه هدف:</b> <code>{portal_name}</code>\n"
+                f"🛞 <b>سایز انتخابی:</b> <code>{size_name}</code>\n"
+                f"📋 <b>تکمیل مدارک:</b> <code>{progress_bar}</code>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "👇 لطفاً بخش مورد نظر خود را انتخاب کنید:"
+            )
             await self.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=text,
-                reply_markup=self.get_main_keyboard()
+                reply_markup=self.get_main_keyboard(user)
             )
 
         elif data == "menu_profile":
-            nat_id = user.get("national_id") or "❌ ثبت نشده"
-            mobile = user.get("mobile") or "❌ ثبت نشده"
-            plate = user.get("car_plate") or "❌ ثبت نشده"
-            vin = user.get("car_vin") or "❌ ثبت نشده"
-            chassis = user.get("chassis_no") or "❌ ثبت نشده"
-            green = user.get("green_sheet_no") or "❌ ثبت نشده"
+            pct, progress_bar = self.calculate_profile_completion(user)
+
+            n_icon = "✅" if user.get("national_id") else "⚠️"
+            m_icon = "✅" if user.get("mobile") else "⚠️"
+            p_icon = "✅" if user.get("car_plate") else "⚠️"
+            v_icon = "✅" if user.get("car_vin") else "⚠️"
+            c_icon = "✅" if user.get("chassis_no") else "⚠️"
+            g_icon = "✅" if user.get("green_sheet_no") else "⚠️"
 
             text = (
-                "👤 <b>مدیریت اطلاعات هویتی و خودرو:</b>\n\n"
-                f"▫️ کد ملی مالک: <code>{nat_id}</code>\n"
-                f"▫️ تلفن همراه: <code>{mobile}</code>\n"
-                f"▫️ شماره پلاک: <code>{plate}</code>\n"
-                f"▫️ کد VIN: <code>{vin}</code>\n"
-                f"▫️ شماره شاسی: <code>{chassis}</code>\n"
-                f"▫️ شماره برگ سبز: <code>{green}</code>\n\n"
-                "جهت تنظیم هر مورد، دکمه مربوطه را انتخاب کنید:"
+                "👤 <b>مدیریت مدارک مالک و اطلاعات خودرو</b>\n"
+                "<i>اطلاعات ذخیره‌شده جهت ثبت آنی در کسری از ثانیه</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 <b>وضعیت تکمیل:</b> <code>{progress_bar}</code>\n\n"
+                f"▫️ <b>کد ملی:</b> <code>{user.get('national_id') or 'وارد نشده'}</code> {n_icon}\n"
+                f"▫️ <b>شماره همراه:</b> <code>{user.get('mobile') or 'وارد نشده'}</code> {m_icon}\n"
+                f"▫️ <b>شماره پلاک:</b> <code>{user.get('car_plate') or 'وارد نشده'}</code> {p_icon}\n"
+                f"▫️ <b>کد VIN خودرو:</b> <code>{user.get('car_vin') or 'وارد نشده'}</code> {v_icon}\n"
+                f"▫️ <b>شماره شاسی:</b> <code>{user.get('chassis_no') or 'وارد نشده'}</code> {c_icon}\n"
+                f"▫️ <b>سریال برگ سبز:</b> <code>{user.get('green_sheet_no') or 'وارد نشده'}</code> {g_icon}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "👇 جهت ثبت یا تغییر هر مورد، روی دکمه آن کلیک کنید:"
             )
+
             kb = {
                 "inline_keyboard": [
                     [
-                        {"text": "✏️ کد ملی", "callback_data": "edit_national_id"},
-                        {"text": "✏️ تلفن همراه", "callback_data": "edit_mobile"}
+                        {"text": f"کد ملی {n_icon}", "callback_data": "edit_national_id"},
+                        {"text": f"تلفن همراه {m_icon}", "callback_data": "edit_mobile"}
                     ],
                     [
-                        {"text": "✏️ شماره پلاک", "callback_data": "edit_plate"},
-                        {"text": "✏️ کد VIN", "callback_data": "edit_vin"}
+                        {"text": f"شماره پلاک {p_icon}", "callback_data": "edit_plate"},
+                        {"text": f"کد VIN کارت {v_icon}", "callback_data": "edit_vin"}
                     ],
                     [
-                        {"text": "✏️ شماره شاسی", "callback_data": "edit_chassis"},
-                        {"text": "✏️ شماره برگ سبز", "callback_data": "edit_green"}
+                        {"text": f"شماره شاسی {c_icon}", "callback_data": "edit_chassis"},
+                        {"text": f"شماره برگ سبز {g_icon}", "callback_data": "edit_green"}
                     ],
                     [
-                        {"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}
+                        {"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}
                     ]
                 ]
             }
@@ -117,36 +172,74 @@ class BaleBotHandlers:
         elif data.startswith("edit_"):
             field = data.replace("edit_", "")
             prompts = {
-                "national_id": ("AWAIT_NAT_ID", "لطفاً <b>کد ملی ۱۰ رقمی</b> مالک خودرو را ارسال کنید:"),
-                "mobile": ("AWAIT_MOBILE", "لطفاً <b>شماره تلفن همراه</b> به نام مالک (مثال: 09121234567) را ارسال کنید:"),
-                "plate": ("AWAIT_PLATE", "لطفاً <b>شماره پلاک خودرو</b> را ارسال کنید (مثال: ۲۲-۳۴۵-ب-۱۲):"),
-                "vin": ("AWAIT_VIN", "لطفاً <b>کد هفده رقمی VIN</b> روی کارت ماشین را ارسال کنید (با IR شروع می‌شود):"),
-                "chassis": ("AWAIT_CHASSIS", "لطفاً <b>شماره شاسی</b> مندرج در برگ سبز خودرو را ارسال کنید:"),
-                "green": ("AWAIT_GREEN", "لطفاً <b>شماره سریال برگ سبز</b> را ارسال کنید:")
+                "national_id": (
+                    "AWAIT_NAT_ID",
+                    "👤 <b>ورود کد ملی مالک خودرو</b>\n\n"
+                    "لطفاً کد ملی ۱۰ رقمی (بدون خط تیره) را ارسال فرمایید:\n"
+                    "<i>مثال: 0012345678</i>"
+                ),
+                "mobile": (
+                    "AWAIT_MOBILE",
+                    "📱 <b>ورود شماره تلفن همراه</b>\n\n"
+                    "شماره همراه باید حتماً به نام شخص مالک باشد:\n"
+                    "<i>مثال: 09123456789</i>"
+                ),
+                "plate": (
+                    "AWAIT_PLATE",
+                    "🚘 <b>ورود شماره پلاک خودرو</b>\n\n"
+                    "شماره پلاک را مطابق کارت خودرو تایپ فرمایید:\n"
+                    "<i>مثال: ۱۲ ب ۳۴۵ ایران ۲۲</i>"
+                ),
+                "vin": (
+                    "AWAIT_VIN",
+                    "🔑 <b>ورود کد هفده رقمی VIN</b>\n\n"
+                    "کد VIN مندرج روی کارت ماشین (معمولاً با IR شروع می‌شود):\n"
+                    "<i>مثال: IRNC1234567890123</i>"
+                ),
+                "chassis": (
+                    "AWAIT_CHASSIS",
+                    "⚙️ <b>ورود شماره شاسی خودرو</b>\n\n"
+                    "شماره شاسی مندرج در شناسنامه مالکیت (برگ سبز):\n"
+                    "<i>مثال: 98765432</i>"
+                ),
+                "green": (
+                    "AWAIT_GREEN",
+                    "📄 <b>ورود شماره سریال برگ سبز</b>\n\n"
+                    "شماره سریال قرمز رنگ بالای برگ سبز خودرو را ارسال نمایید:"
+                )
             }
             if field in prompts:
                 st, msg = prompts[field]
                 await set_state(chat_id, st)
-                kb = {"inline_keyboard": [[{"text": "انصراف ❌", "callback_data": "menu_profile"}]]}
+                kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
                 await self.bot.edit_message_text(chat_id, message_id, msg, reply_markup=kb)
 
         elif data == "menu_size":
             current_size = user.get("target_tire_size", "185_65_14")
             count = user.get("tire_count", 2)
+            
             rows = []
             for k, title in TIRE_SIZES.items():
-                mark = "✅ " if k == current_size else ""
-                rows.append([{"text": f"{mark}{title}", "callback_data": f"set_size_{k}"}])
+                is_selected = (k == current_size)
+                badge = "🔘 " if is_selected else "⚪ "
+                rows.append([{"text": f"{badge}{title}", "callback_data": f"set_size_{k}"}])
 
-            count_2_mark = "✅ ۲ حلقه" if count == 2 else "۲ حلقه"
-            count_4_mark = "✅ ۴ حلقه" if count == 4 else "۴ حلقه"
+            count_2_mark = "🔘 ۲ حلقه (سهمیه نیم‌فصل)" if count == 2 else "⚪ ۲ حلقه"
+            count_4_mark = "🔘 ۴ حلقه (سهمیه کامل سالانه)" if count == 4 else "⚪ ۴ حلقه"
             rows.append([
                 {"text": count_2_mark, "callback_data": "set_count_2"},
                 {"text": count_4_mark, "callback_data": "set_count_4"}
             ])
-            rows.append([{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
+            rows.append([{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}])
 
-            text = "🛞 <b>سایز و تعداد لاستیک مورد نظر خود را انتخاب کنید:</b>"
+            text = (
+                "🛞 <b>انتخاب هوشمند سایز و تعداد تایر</b>\n"
+                "<i>تایر مدنظر خود را مطابق استاندارد کارخانه خودرو انتخاب کنید</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"▫️ <b>سایز فعلی:</b> <code>{TIRE_SIZES.get(current_size, 'نامشخص')}</code>\n"
+                f"▫️ <b>تعداد سهمیه:</b> <b>{count} حلقه</b>\n\n"
+                "👇 جهت تغییر، روی گزینه مورد نظر کلیک نمایید:"
+            )
             await self.bot.edit_message_text(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
         elif data.startswith("set_size_"):
@@ -160,16 +253,30 @@ class BaleBotHandlers:
             await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": "menu_size"})
 
         elif data == "menu_portal":
-            cur_p = user.get("target_portal", "kavir")
+            cur_p = user.get("target_portal", "barez")
             rows = []
             for k, info in PORTALS.items():
-                mark = "✅ " if k == cur_p else ""
-                rows.append([{"text": f"{mark}{info['title']}", "callback_data": f"set_portal_{k}"}])
-            rows.append([{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
+                is_sel = (k == cur_p)
+                badge = "🔘 " if is_sel else "⚪ "
+                hours = "، ".join(info.get("sale_hours", []))
+                rows.append([{"text": f"{badge}{info['title']}", "callback_data": f"set_portal_{k}"}])
+
+            rows.append([{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}])
 
             text = (
-                "🏢 <b>انتخاب سامانه هدف برای شکار سهمیه:</b>\n\n"
-                "کدام سامانه مد نظر شماست؟ ربات در زمان بازگشایی مستقیماً به API این سامانه شلیک می‌کند."
+                "🏢 <b>انتخاب سامانه هدف جهت شکار سهمیه</b>\n"
+                "<i>ربات در لحظه آغاز فروش مستقیماً به API این سامانه متصل خواهد شد</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🏭 <b>۱. گروه صنعتی بارز (پیشنهادی):</b>\n"
+                "▫️ دارای سامانه خرید آنلاین با تحویل دکاپست و تحویل حضوری.\n"
+                "▫️ ساعات معمول بازگشایی: <b>۰۹:۰۰ و ۱۰:۰۰ صبح</b>\n\n"
+                "🏭 <b>۲. کویر تایر:</b>\n"
+                "▫️ فروش مستقیم اینترنتی درب کارخانه با قیمت مصوب دولتی.\n"
+                "▫️ ساعات معمول بازگشایی: <b>۰۹:۰۰ الی ۱۱:۰۰ صبح</b>\n\n"
+                "🏛 <b>۳. سامانه جامع تجارت (تخصیص کالا):</b>\n"
+                "▫️ سامانه ملی استعلام سهمیه و حواله تایر دولتی.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "👇 لطفاً کارخانه یا سامانه مورد نظر را انتخاب نمایید:"
             )
             await self.bot.edit_message_text(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
@@ -180,18 +287,32 @@ class BaleBotHandlers:
 
         elif data == "menu_sniper":
             is_active = user.get("sniper_enabled", 0)
-            status_text = "🟢 فعال (آماده‌باش شلیک)" if is_active else "🔴 غیرفعال"
-            btn_toggle = "غیرفعال‌سازی 🛑" if is_active else "روشن کردن شکارچی ⚡"
+            status_badge = "🟢 <b>روشن و آماده‌باش شلیک (Ready)</b>" if is_active else "🔴 <b>خاموش (Idle)</b>"
+            btn_toggle = "🛑 غیرفعال‌سازی شکارچی" if is_active else "⚡ روشن کردن شکارچی خودکار"
+
+            portal_name = PORTALS.get(user.get("target_portal", "barez"), {}).get("title", "بارز")
+            size_name = TIRE_SIZES.get(user.get("target_tire_size", "185_65_14"), "185/65R14")
 
             text = (
-                "⚡ <b>تنظیمات شکارچی خودکار (Auto-Sniper):</b>\n\n"
-                f"وضعیت کنونی: <b>{status_text}</b>\n\n"
-                "با روشن بودن شکارچی، ربات قبل از ساعت بازگشایی ارتباط Keep-Alive برقرار کرده و در میلی‌ثانیه اول سهمیه را قفل می‌کند."
+                "⚡ <b>کاکپیت شکارچی خودکار (Auto-Sniper HUD)</b>\n"
+                "<i>فناوری رهگیری ثانیه‌ای و شلیک بدون دخالت دست</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📡 <b>وضعیت کنونی:</b> {status_badge}\n"
+                f"🎯 <b>هدف قفل‌شده:</b> <code>{portal_name}</code>\n"
+                f"🛞 <b>محصول هدف:</b> <code>{size_name}</code>\n"
+                f"📦 <b>تعداد رزرو:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n\n"
+                "⚙️ <b>عملکرد پشت صحنه اسنایپر:</b>\n"
+                "▫️ پیش‌گرم‌سازی کانکشن با سوکت دائمی (TCP Keep-Alive)\n"
+                "▫️ رصد لحظه‌ای باز شدن سهمیه‌ها با فرکانس ۲۰۰ میلی‌ثانیه\n"
+                "▫️ حل کد امنیتی کپچا با الگوریتم‌های پردازش تصویر محلی\n"
+                "▫️ شلیک پکیج ثبت‌نام در میلی‌ثانیه اول بازگشایی\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "👇 جهت تغییر وضعیت کلیک کنید:"
             )
             kb = {
                 "inline_keyboard": [
                     [{"text": btn_toggle, "callback_data": "toggle_sniper"}],
-                    [{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}]
+                    [{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}]
                 ]
             }
             await self.bot.edit_message_text(chat_id, message_id, text, reply_markup=kb)
@@ -201,11 +322,14 @@ class BaleBotHandlers:
             if is_active:
                 await self.sniper.stop_sniper_for_user(chat_id)
             else:
-                # بررسی حداقل اطلاعات ضروری
                 if not user.get("national_id") or not user.get("mobile"):
                     await self.bot.send_message(
                         chat_id=chat_id,
-                        text="⚠️ جهت فعال‌سازی شکارچی، ابتدا باید حداقل <b>کد ملی</b> و <b>شماره تلفن</b> خود را ثبت کنید!"
+                        text=(
+                            "⚠️ <b>اطلاعات ضروری ناقص است!</b>\n\n"
+                            "برای فعال‌سازی شکارچی خودکار، حداقل باید <b>کد ملی</b> و <b>شماره تلفن</b> "
+                            "خود را در بخش مدارک ثبت کنید تا در لحظه شلیک با خطای هویت مواجه نشوید."
+                        )
                     )
                     return
                 await upsert_user(chat_id, sniper_enabled=1)
@@ -217,44 +341,79 @@ class BaleBotHandlers:
             await self.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text="⏳ <b>در حال انجام تست بنچمارک سرعت میلی‌ثانیه‌ای و پینگ به سرورها...</b>"
+                text="⏳ <b>در حال اجرای تست بنچمارک سرعت و سنجش تاخیر شبکه...</b>"
             )
             benchmark = await self.sniper.simulate_ultra_fast_test(chat_id)
             portal_latencies = await self.sniper.measure_portal_latencies()
 
-            lat_lines = "\n".join([f"▫️ {p}: <b>{lat} ms</b>" for p, lat in portal_latencies.items()])
+            lat_lines = "\n".join([f"▫️ {p}: <b>{lat} ms</b> ⚡" for p, lat in portal_latencies.items()])
             result_msg = (
-                "🚀 <b>نتایج آزمون سرعت واقعی (Speed Benchmark):</b>\n\n"
-                f"🏢 سامانه انتخابی: <code>{benchmark['portal']}</code>\n"
-                f"⚡ تاخیر برقراری اتصال TCP: <b>{benchmark['tcp_latency_ms']} ms</b>\n"
-                f"🧩 زمان پردازش تصویر کپچا (OpenCV): <b>{benchmark['captcha_processing_ms']} ms</b>\n"
-                f"⏱ زمان کل چرخه درخواست: <b>{benchmark['total_benchmark_ms']} ms</b>\n"
-                f"🏆 رتبه سرعت سیستم: <b>{benchmark['speed_rating']}</b>\n\n"
-                "🌐 <b>پینگ مستقیم سرور شما به سامانه‌ها:</b>\n"
+                "🚀 <b>نتایج آزمون بنچمارک سرعت واقعی</b>\n"
+                "<i>سنجش تاخیر میلی‌ثانیه‌ای سخت‌افزار و شبکه</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏢 <b>سامانه تست‌شده:</b> <code>{benchmark['portal']}</code>\n"
+                f"⚡ <b>تاخیر اتصال TCP:</b> <b>{benchmark['tcp_latency_ms']} میلی‌ثانیه</b>\n"
+                f"🧩 <b>پردازش تصویر کپچا:</b> <b>{benchmark['captcha_processing_ms']} میلی‌ثانیه</b>\n"
+                f"⏱ <b>کل زمان چرخه درخواست:</b> <b>{benchmark['total_benchmark_ms']} میلی‌ثانیه</b>\n"
+                f"🏆 <b>رتبه عملکرد سیستم:</b> {benchmark['speed_rating']}\n\n"
+                "🌐 <b>پینگ مستقیم به سرورهای توزیع:</b>\n"
                 f"{lat_lines}\n\n"
-                "💡 <i>نکته: با این سرعت، درخواست شما جلوتر از ۹۹.۸٪ کاربران عادی و مرورگرها به سرور تحویل داده می‌شود.</i>"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>با این سرعت پردازش، بسته ثبت‌نام شما ثانیه‌ها جلوتر از کاربران عادی به سرور تحویل داده می‌شود.</i>"
             )
-            kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}]]}
+            kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}]]}
             await self.bot.send_message(chat_id=chat_id, text=result_msg, reply_markup=kb)
 
         elif data == "view_profile":
-            p_name = PORTALS.get(user.get("target_portal", "kavir"), {}).get("title", "نامشخص")
+            p_name = PORTALS.get(user.get("target_portal", "barez"), {}).get("title", "نامشخص")
             s_name = TIRE_SIZES.get(user.get("target_tire_size", "185_65_14"), "نامشخص")
-            sniper_st = "🟢 فعال" if user.get("sniper_enabled", 0) else "🔴 غیرفعال"
+            sniper_st = "🟢 <b>روشن و فعال</b>" if user.get("sniper_enabled", 0) else "🔴 <b>خاموش</b>"
+            pct, progress_bar = self.calculate_profile_completion(user)
 
             summary = (
-                "📋 <b>خلاصه وضعیت پروفایل و تنظیمات شکارچی:</b>\n\n"
-                f"👤 کد ملی: <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
-                f"📱 تلفن همراه: <code>{user.get('mobile') or 'ثبت نشده'}</code>\n"
-                f"🚘 شماره پلاک: <code>{user.get('car_plate') or 'ثبت نشده'}</code>\n"
-                f"🔑 کد VIN: <code>{user.get('car_vin') or 'ثبت نشده'}</code>\n"
-                f"🏢 سامانه هدف: <b>{p_name}</b>\n"
-                f"🛞 سایز تایر: <b>{s_name}</b>\n"
-                f"📦 تعداد سهمیه: <b>{user.get('tire_count', 2)} حلقه</b>\n"
-                f"⚡ وضعیت اسنایپر: <b>{sniper_st}</b>\n"
+                "📋 <b>شناسنامه و کارت وضعیت اسنایپر شما</b>\n"
+                "<i>خلاصه کلیه پارامترهای آماده برای ثبت‌نام</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 <b>کد ملی:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
+                f"📱 <b>تلفن همراه:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code>\n"
+                f"🚘 <b>شماره پلاک:</b> <code>{user.get('car_plate') or 'ثبت نشده'}</code>\n"
+                f"🔑 <b>کد هفده‌رقمی VIN:</b> <code>{user.get('car_vin') or 'ثبت نشده'}</code>\n"
+                f"⚙️ <b>شماره شاسی:</b> <code>{user.get('chassis_no') or 'ثبت نشده'}</code>\n"
+                f"📄 <b>شماره برگ سبز:</b> <code>{user.get('green_sheet_no') or 'ثبت نشده'}</code>\n\n"
+                f"🏢 <b>کارخانه هدف:</b> <code>{p_name}</code>\n"
+                f"🛞 <b>سایز و مدل تایر:</b> <code>{s_name}</code>\n"
+                f"📦 <b>تعداد درخواستی:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n"
+                f"⚡ <b>وضعیت شکارچی:</b> {sniper_st}\n"
+                f"📊 <b>درصد آمادگی:</b> <code>{progress_bar}</code>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
             )
-            kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "main_menu"}]]}
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "✏️ ویرایش مدارک", "callback_data": "menu_profile"}],
+                    [{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}]
+                ]
+            }
             await self.bot.edit_message_text(chat_id, message_id, summary, reply_markup=kb)
+
+        elif data == "menu_guide":
+            guide_text = (
+                "📖 <b>راهنمای طلایی ثبت‌نام تایر دولتی</b>\n"
+                "<i>نکات کلیدی برای موفقیت ۱۰۰٪ در ثبت سهمیه</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "⏰ <b>۱. ساعات طلایی بازگشایی ظرفیت‌ها:</b>\n"
+                "▫️ <b>بارز:</b> معمولاً روزهای زوج و فرد رأس ساعت <b>۰۹:۰۰</b> یا <b>۱۰:۰۰ صبح</b>\n"
+                "▫️ <b>کویر تایر:</b> روزانه معمولاً بین ساعت <b>۰۹:۳۰</b> تا <b>۱۱:۰۰ صبح</b>\n\n"
+                "📜 <b>۲. قوانین سهمیه دولتی:</b>\n"
+                "▫️ به هر کد ملی و پلاک خودرو، <b>سالانه حداکثر ۴ حلقه</b> تایر تعلق می‌گیرد.\n"
+                "▫️ شماره تلفن همراه باید حتماً به نام مالک خودرو و کد ملی ثبت‌شده باشد.\n"
+                "▫️ تاریخ انقضای کارت ماشین نباید منقضی شده باشد.\n\n"
+                "⚡ <b>۳. توصیه سرعت برای برنده شدن:</b>\n"
+                "▫️ ۵ دقیقه قبل از ساعت بازگشایی، وارد ربات شده و شکارچی را در وضعیت 🟢 فعال بگذارید.\n"
+                "▫️ ترجیحاً ربات را روی اینترنت با پینگ پایین فعال نگه دارید.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}]]}
+            await self.bot.edit_message_text(chat_id, message_id, guide_text, reply_markup=kb)
 
     async def handle_text_message(self, message: Dict[str, Any]):
         chat_id = message.get("chat", {}).get("id")
@@ -277,11 +436,14 @@ class BaleBotHandlers:
                 await upsert_user(chat_id, national_id=cleaned, state="IDLE")
                 await self.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✅ کد ملی <code>{cleaned}</code> با موفقیت ذخیره شد.",
-                    reply_markup=self.get_main_keyboard()
+                    text=f"✅ <b>کد ملی با موفقیت ثبت شد:</b> <code>{cleaned}</code>",
+                    reply_markup=self.get_main_keyboard(await get_user(chat_id))
                 )
             else:
-                await self.bot.send_message(chat_id=chat_id, text="❌ کد ملی باید دقیقاً ۱۰ رقم باشد. لطفاً مجدداً ارسال کنید:")
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ <b>فرمت نامعتبر!</b>\nکد ملی باید دقیقاً ۱۰ رقم باشد. لطفاً مجدداً ارسال فرمایید:"
+                )
 
         elif state == "AWAIT_MOBILE":
             cleaned = re.sub(r"\D", "", text)
@@ -289,18 +451,21 @@ class BaleBotHandlers:
                 await upsert_user(chat_id, mobile=cleaned, state="IDLE")
                 await self.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✅ شماره موبایل <code>{cleaned}</code> ذخیره شد.",
-                    reply_markup=self.get_main_keyboard()
+                    text=f"✅ <b>شماره تلفن ذخیره شد:</b> <code>{cleaned}</code>",
+                    reply_markup=self.get_main_keyboard(await get_user(chat_id))
                 )
             else:
-                await self.bot.send_message(chat_id=chat_id, text="❌ شماره همراه نامعتبر است. فرمت صحیح: <code>09121234567</code>")
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ <b>شماره همراه نامعتبر!</b>\nفرمت صحیح: <code>09121234567</code>"
+                )
 
         elif state == "AWAIT_PLATE":
             await upsert_user(chat_id, car_plate=text, state="IDLE")
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ شماره پلاک <code>{text}</code> ذخیره شد.",
-                reply_markup=self.get_main_keyboard()
+                text=f"✅ <b>شماره پلاک ثبت شد:</b> <code>{text}</code>",
+                reply_markup=self.get_main_keyboard(await get_user(chat_id))
             )
 
         elif state == "AWAIT_VIN":
@@ -308,28 +473,28 @@ class BaleBotHandlers:
             await upsert_user(chat_id, car_vin=vin_clean, state="IDLE")
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ کد VIN <code>{vin_clean}</code> ذخیره شد.",
-                reply_markup=self.get_main_keyboard()
+                text=f"✅ <b>کد VIN کارت خودرو ذخیره شد:</b> <code>{vin_clean}</code>",
+                reply_markup=self.get_main_keyboard(await get_user(chat_id))
             )
 
         elif state == "AWAIT_CHASSIS":
             await upsert_user(chat_id, chassis_no=text.strip().upper(), state="IDLE")
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ شماره شاسی <code>{text}</code> ذخیره شد.",
-                reply_markup=self.get_main_keyboard()
+                text=f"✅ <b>شماره شاسی ذخیره شد:</b> <code>{text}</code>",
+                reply_markup=self.get_main_keyboard(await get_user(chat_id))
             )
 
         elif state == "AWAIT_GREEN":
             await upsert_user(chat_id, green_sheet_no=text.strip(), state="IDLE")
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ شماره برگ سبز <code>{text}</code> ذخیره شد.",
-                reply_markup=self.get_main_keyboard()
+                text=f"✅ <b>شماره سریال برگ سبز ثبت شد:</b> <code>{text}</code>",
+                reply_markup=self.get_main_keyboard(await get_user(chat_id))
             )
         else:
             await self.bot.send_message(
                 chat_id=chat_id,
-                text="دستور متوجه نشد. برای شروع منوی اصلی از /start استفاده کنید یا گزینه‌های زیر را انتخاب کنید:",
-                reply_markup=self.get_main_keyboard()
+                text="دستور متوجه نشد. برای بازگشت به داشبورد از دکمه‌های زیر استفاده کنید:",
+                reply_markup=self.get_main_keyboard(user)
             )

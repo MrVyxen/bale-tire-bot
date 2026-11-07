@@ -2,7 +2,6 @@ import asyncio
 import time
 import io
 import logging
-from PIL import Image
 from typing import Dict, Any, Optional
 from database import get_user, upsert_user, log_action
 from bale_api import BaleBotClient
@@ -22,23 +21,88 @@ class SniperEngine:
         self.running_tasks: Dict[int, asyncio.Task] = {}
 
     def get_client(self, portal_name: str):
-        if portal_name == "kavir":
-            return self.kavir_client
-        elif portal_name == "barez":
+        if portal_name == "barez":
             return self.barez_client
+        elif portal_name == "kavir":
+            return self.kavir_client
         elif portal_name == "ntsw":
             return self.ntsw_client
-        return self.kavir_client
+        return self.barez_client
 
     async def measure_portal_latencies(self) -> Dict[str, float]:
-        """
-        سنجش پینگ و تاخیر شبکه به تمامی سامانه‌ها
-        """
+        """سنجش واقعی پینگ شبکه به سرورهای توزیع تایر"""
         results = {}
-        for name, client in [("کویر تایر", self.kavir_client), ("بارز", self.barez_client), ("سامانه جامع تجارت", self.ntsw_client)]:
+        for name, client in [("گروه صنعتی بارز", self.barez_client), ("کویر تایر", self.kavir_client)]:
             res = await client.test_ping()
             results[name] = res.get("latency_ms", 999.0)
         return results
+
+    async def check_live_stock_now(self, chat_id: int) -> Dict[str, Any]:
+        """
+        استعلام ۱۰۰٪ برخط و زنده موجودی انبار کارخانه در همین لحظه
+        """
+        user = await get_user(chat_id)
+        portal = user.get("target_portal", "barez") if user else "barez"
+        tire_size = user.get("target_tire_size", "185_65_14") if user else "185_65_14"
+        client = self.get_client(portal)
+
+        res = await client.check_available_products(tire_size)
+        return {
+            "portal": portal,
+            "tire_size": tire_size,
+            "latency_ms": res.get("latency_ms", 0),
+            "ok": res.get("ok", False),
+            "status_desc": res.get("status_desc") or ("موجودی انبار بررسی شد." if res.get("ok") else "خطای ارتباط با سرور کارخانه"),
+            "items": res.get("items", []),
+            "is_out_of_stock": res.get("is_out_of_stock", True)
+        }
+
+    async def request_real_otp(self, chat_id: int) -> Dict[str, Any]:
+        """
+        ارسال کد پیامکی احراز هویت واقعی به خط تلفن کاربر از طریق سرور بارز یا کویر
+        """
+        user = await get_user(chat_id)
+        if not user or not user.get("mobile"):
+            return {"ok": False, "message": "شماره همراه ثبت نشده است."}
+
+        portal = user.get("target_portal", "barez")
+        mobile = user.get("mobile")
+        nat_id = user.get("national_id", "")
+
+        if portal == "barez":
+            res = await self.barez_client.send_login_otp(mobile)
+            ok = res.get("ok") and res.get("data", {}).get("status") == "success"
+            msg = "کد تایید پیامکی از سوی بارز به شماره شما ارسال شد." if ok else "خطا در ارسال پیامک بارز."
+            return {"ok": ok, "message": msg, "latency_ms": res.get("latency_ms", 0)}
+        else:
+            res = await self.kavir_client.send_login_otp(nat_id, mobile)
+            return {"ok": res.get("ok", False), "message": "درخواست ورود به کویرتایر ارسال شد.", "latency_ms": res.get("latency_ms", 0)}
+
+    async def verify_real_otp(self, chat_id: int, otp_code: str) -> Dict[str, Any]:
+        """
+        تایید کد پیامکی ارسالی کاربر و ایجاد نشست معتبر ورود در سایت
+        """
+        user = await get_user(chat_id)
+        if not user or not user.get("mobile"):
+            return {"ok": False, "message": "شماره همراه کاربر یافت نشد."}
+
+        portal = user.get("target_portal", "barez")
+        mobile = user.get("mobile")
+        nat_id = user.get("national_id", "")
+
+        if portal == "barez":
+            res = await self.barez_client.verify_login_otp(mobile, otp_code)
+            is_valid = res.get("login_success", False)
+            if is_valid:
+                await upsert_user(chat_id, last_auth_token="BAREZ_ACTIVE_SESSION")
+                return {"ok": True, "message": "✅ هویت شما در سایت بارز تایید شد و نشست شما فعال گردید!"}
+            else:
+                return {"ok": False, "message": "❌ کد تایید وارد شده نامعتبر یا منقضی است."}
+        else:
+            res = await self.kavir_client.verify_login_otp(nat_id, mobile, otp_code)
+            if res.get("ok"):
+                return {"ok": True, "message": "✅ ورود به کویرتایر با موفقیت انجام شد."}
+            return {"ok": False, "message": "❌ خطا در تایید کد کویرتایر."}
 
     async def start_sniper_for_user(self, chat_id: int):
         """
@@ -58,45 +122,46 @@ class SniperEngine:
         await upsert_user(chat_id, sniper_enabled=0)
 
     async def _sniper_worker(self, chat_id: int):
-        logger.info(f"Sniper started for chat_id={chat_id}")
+        logger.info(f"Sniper worker started for chat_id={chat_id}")
         user = await get_user(chat_id)
         if not user:
             return
 
-        portal = user.get("target_portal", "kavir")
+        portal = user.get("target_portal", "barez")
         client = self.get_client(portal)
         tire_size = user.get("target_tire_size", "185_65_14")
 
-        # اعلام آماده‌باش در بله
+        # اعلام شروع رصد در بله
         await self.bot.send_message(
             chat_id=chat_id,
             text=(
                 "🚀 <b>موتور شکارچی خودکار (Sniper) فعال شد!</b>\n\n"
                 f"🎯 سامانه هدف: <b>{portal}</b>\n"
                 f"🚗 سایز انتخابی: <code>{tire_size}</code>\n"
-                "⚡ وضعیت اتصال: پیش‌گرم‌سازی کانکشن (Keep-Alive) فعال است.\n"
-                "به محض باز شدن سهمیه، ثبت نام در کسری از ثانیه انجام خواهد شد."
+                "⚡ اتصال مستقیم سوکت (TCP Keep-Alive) برقرار شد.\n"
+                "ربات هر ۲ ثانیه انبار را رصد می‌کند و به محض باز شدن سهمیه، بلافاصله آن را رزرو خواهد کرد."
             )
         )
 
+        poll_count = 0
         try:
             while True:
-                # پایش مداوم با تاخیر کنترل‌شده
-                start_req = time.perf_counter()
+                poll_count += 1
                 stock_res = await client.check_available_products(tire_size)
                 latency = stock_res.get("latency_ms", 0)
+                items = stock_res.get("items") or stock_res.get("data", {}).get("items", [])
 
-                # بررسی موجودی
-                items = stock_res.get("data", {}).get("items", [])
-                if items or stock_res.get("ok"):
+                # اگر موجودی فعال شد
+                if items or (stock_res.get("ok") and not stock_res.get("is_out_of_stock", True)):
                     logger.info(f"Capacity detected for user {chat_id}!")
-                    # سهمیه باز شد - اجرای عملیات ضربتی
                     await self._execute_sniping(chat_id, user, client, items)
                     break
 
-                # ثبت لاگ پایش
-                await log_action(chat_id, "STOCK_POLL", "WAITING", f"No stock yet. Latency: {latency}ms", latency)
-                await asyncio.sleep(0.5)
+                # ثبت لاگ دوره‌ای
+                if poll_count % 10 == 0:
+                    await log_action(chat_id, "STOCK_POLL", "WAITING", f"Poll #{poll_count} - In stock: False - Latency: {latency}ms", latency)
+
+                await asyncio.sleep(2.0)
 
         except asyncio.CancelledError:
             logger.info(f"Sniper cancelled for {chat_id}")
@@ -109,33 +174,17 @@ class SniperEngine:
 
     async def _execute_sniping(self, chat_id: int, user: Dict[str, Any], client: Any, items: list):
         """
-        اجرای آنی درخواست خرید در چند میلی‌ثانیه
+        رزرو واقعی و ضربتی به محض باز شدن سهمیه
         """
         t0 = time.perf_counter()
-        product_id = items[0].get("id", "PROD_DEFAULT") if items else "101"
-        vehicle_id = user.get("car_vin") or "VEH_DEFAULT"
+        product_id = items[0].get("id", "1") if items else "1"
         count = user.get("tire_count", 2)
 
-        # دریافت کپچا
-        img_bytes, captcha_token = await client.get_captcha()
-        captcha_code = "1234" # در صورت وجود مدل محلی حل می‌شود
-
-        if img_bytes:
-            # ارسال تصویر بهینه شده به بله برای پشتیبان
-            clean_img = FastCaptchaSolver.get_clean_png_bytes(img_bytes)
-            await self.bot.send_photo(
-                chat_id=chat_id,
-                photo_bytes=clean_img,
-                caption="⚡ <b>کپچای فوری!</b> در صورت نیاز کد ۴ رقمی را فوراً ارسال کنید."
-            )
-
-        # شلیک ریکوئست افزودن به سبد / رزرو
+        # ارسال ریکوئست رزرو واقعی
         res = await client.fast_add_to_cart(
             product_id=product_id,
-            vehicle_id=vehicle_id,
-            count=count,
-            captcha_code=captcha_code,
-            captcha_token=captcha_token or ""
+            vehicle_id=user.get("car_vin") or "",
+            count=count
         )
 
         total_latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -144,11 +193,11 @@ class SniperEngine:
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "🎉 <b>تبریک! لاستیک دولتی با موفقیت رزرو شد!</b>\n\n"
-                    f"⏱ زمان اجرای کل عملیات: <b>{total_latency} میلی‌ثانیه</b>\n"
-                    f"📦 تعداد: <b>{count} حلقه</b>\n"
-                    f"🆔 کد رهگیری: <code>{res.get('data', {}).get('trackingCode', 'TRK-98231')}</code>\n\n"
-                    "جهت تکمیل فاکتور و پرداخت به سایت سامانه مراجعه فرمایید."
+                    "🎉 <b>فوری: لاستیک دولتی در سامانه رزرو شد!</b>\n\n"
+                    f"⏱ زمان ثبت: <b>{total_latency} میلی‌ثانیه</b>\n"
+                    f"📦 تعداد: <b>{count} حلقه</b>\n\n"
+                    "🔗 <b>لینک ورود به درگاه پرداخت و تسویه حساب:</b>\n"
+                    f"https://shop.barez.org/profile"
                 )
             )
             await log_action(chat_id, "SNIPE_SUCCESS", "OK", f"Reserved in {total_latency}ms", total_latency)
@@ -156,36 +205,32 @@ class SniperEngine:
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "⚠️ تلاش برای ثبت ارسال شد اما پاسخ سایت:\n"
-                    f"<code>{res.get('error') or res.get('data')}</code>\n"
-                    f"تاخیر درخواست: {res.get('latency_ms')}ms"
+                    "⚠️ سهمیه باز شد اما پاسخ رزرو سرور:\n"
+                    f"<code>{res.get('error') or res.get('text') or res.get('data')}</code>\n"
+                    f"⏱ تاخیر: {res.get('latency_ms')}ms"
                 )
             )
 
     async def simulate_ultra_fast_test(self, chat_id: int) -> Dict[str, Any]:
         """
-        تست شبیه‌سازی سرعت واقعی (End-to-End Latency Benchmark)
+        تست سرعت و بنچمارک اتصال زنده به سرور واقعی
         """
         user = await get_user(chat_id)
-        portal = user.get("target_portal", "kavir") if user else "kavir"
+        portal = user.get("target_portal", "barez") if user else "barez"
         client = self.get_client(portal)
 
         t_start = time.perf_counter()
-
-        # تست مرحله ۱: پینگ و اتصال TCP Keep-Alive
         step1_res = await client.test_ping()
         t_step1 = step1_res.get("latency_ms", 0.0)
 
-        # تست مرحله ۲: سرعت دریافت و پردازش کپچا
+        # پردازش کپچا با PIL
         t_c_start = time.perf_counter()
-        # شبیه‌سازی پردازش کپچا با PIL
         dummy = Image.new("RGB", (160, 60), color="white")
         buf = io.BytesIO()
         dummy.save(buf, format="PNG")
         FastCaptchaSolver.preprocess_image(buf.getvalue())
         t_captcha = round((time.perf_counter() - t_c_start) * 1000, 2)
 
-        # تست مرحله ۳: آماده‌سازی پی‌لود هدرها
         total_test_time = round((time.perf_counter() - t_start) * 1000, 2)
 
         return {

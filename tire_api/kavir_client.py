@@ -6,7 +6,7 @@ class KavirTireClient(BaseTireClient):
     """
     کلاینت مستقیم و بهینه‌شده سامانه فروش اینترنتی کویرتایر
     """
-    def __init__(self, base_url: str = "https://customer.kavirtire.ir"):
+    def __init__(self, base_url: str = "https://kavirtire.ir/esale"):
         super().__init__(base_url)
 
     async def send_login_otp(self, national_id: str, mobile: str) -> Dict[str, Any]:

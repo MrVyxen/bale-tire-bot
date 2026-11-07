@@ -44,6 +44,10 @@ class BaleBotHandlers:
                     {"text": sniper_btn_text, "callback_data": "menu_sniper"}
                 ],
                 [
+                    {"text": "📡 استعلام زنده موجودی انبار", "callback_data": "live_check_stock"},
+                    {"text": "🔐 احراز هویت پیامکی در سایت", "callback_data": "auth_real_otp"}
+                ],
+                [
                     {"text": f"👤 مدارک و خودرو {profile_badge}", "callback_data": "menu_profile"},
                     {"text": f"🛞 سایز: {cur_size_title}", "callback_data": "menu_size"}
                 ],
@@ -337,6 +341,85 @@ class BaleBotHandlers:
 
             await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": "menu_sniper"})
 
+        elif data == "live_check_stock":
+            await self.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="📡 <b>در حال برقراری ارتباط زنده با سرور کارخانه و استعلام موجودی انبار...</b>"
+            )
+            stock_info = await self.sniper.check_live_stock_now(chat_id)
+            p_title = PORTALS.get(stock_info["portal"], {}).get("title", stock_info["portal"])
+            s_title = TIRE_SIZES.get(stock_info["tire_size"], stock_info["tire_size"])
+
+            if not stock_info["ok"]:
+                msg = (
+                    "⚠️ <b>خطای موقت در ارتباط با سامانه کارخانه</b>\n\n"
+                    f"🏢 سامانه: <code>{p_title}</code>\n"
+                    f"⏱ پینگ اتصال: <b>{stock_info['latency_ms']} میلی‌ثانیه</b>\n\n"
+                    "علت: سرور کارخانه پاسخ نداد یا خارج از ساعات مجاز است."
+                )
+            elif stock_info["is_out_of_stock"]:
+                msg = (
+                    "🏭 <b>استعلام برخط و زنده موجودی انبار</b>\n"
+                    "<i>گزارش مستقیم از دیتابیس کارخانه در همین ثانیه</i>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🏢 <b>کارخانه هدف:</b> <code>{p_title}</code>\n"
+                    f"🛞 <b>سایز استعلام‌شده:</b> <code>{s_title}</code>\n"
+                    f"⏱ <b>تاخیر پاسخگویی سرور:</b> <b>{stock_info['latency_ms']} میلی‌ثانیه</b>\n"
+                    f"📦 <b>وضعیت کنونی:</b> 🔴 <b>{stock_info['status_desc']}</b>\n\n"
+                    "💡 <i>ظرفیت‌های دولتی معمولاً رأس ساعت ۰۹:۰۰ یا ۱۰:۰۰ صبح باز می‌شوند. می‌توانید شکارچی را فعال بگذارید تا به محض باز شدن سهمیه، ثانیه‌ای ثبت کند.</i>"
+                )
+            else:
+                items_cnt = len(stock_info.get("items", []))
+                msg = (
+                    "🎉 <b>فوری: سهمیه باز است و تایر موجود است!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🏢 <b>کارخانه:</b> <code>{p_title}</code>\n"
+                    f"🛞 <b>سایز:</b> <code>{s_title}</code>\n"
+                    f"📦 <b>تعداد اقلام آماده رزرو:</b> <b>{items_cnt} مدل</b>\n"
+                    f"⏱ <b>تاخیر استعلام:</b> <b>{stock_info['latency_ms']} ms</b>\n\n"
+                    "⚡ فوراً دکمه شکارچی خودکار را روشن کنید تا ثبت‌نام شما در چند میلی‌ثانیه انجام شود!"
+                )
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "🔄 استعلام مجدد", "callback_data": "live_check_stock"}],
+                    [{"text": "🔙 بازگشت به داشبورد اصلی", "callback_data": "main_menu"}]
+                ]
+            }
+            await self.bot.send_message(chat_id=chat_id, text=msg, reply_markup=kb)
+
+        elif data == "auth_real_otp":
+            if not user.get("mobile"):
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ <b>شماره موبایل یافت نشد!</b>\n\nلطفاً ابتدا از بخش «👤 مدارک و خودرو» شماره همراه خود را وارد کنید."
+                )
+                return
+            await self.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"📲 <b>در حال ارسال درخواست پیامک به سرور کارخانه برای شماره {user.get('mobile')}...</b>"
+            )
+            res = await self.sniper.request_real_otp(chat_id)
+            if res.get("ok"):
+                await set_state(chat_id, "AWAIT_REAL_OTP")
+                msg = (
+                    "📩 <b>کد تایید پیامکی از سوی سایت ارسال شد!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"سرور کارخانه کد احراز هویت را به شماره <code>{user.get('mobile')}</code> پیامک کرد.\n\n"
+                    "👇 <b>لطفاً کد تایید ۵ رقمی دریافتی را در چت ارسال فرمایید:</b>"
+                )
+                kb = {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "main_menu"}]]}
+                await self.bot.send_message(chat_id=chat_id, text=msg, reply_markup=kb)
+            else:
+                msg = (
+                    "❌ <b>خطا در ارسال پیامک احراز هویت:</b>\n\n"
+                    f"<code>{res.get('message')}</code>\n\n"
+                    "لطفاً مطمئن شوید شماره همراه معتبر است یا لحظاتی دیگر تلاش فرمایید."
+                )
+                kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به منو", "callback_data": "main_menu"}]]}
+                await self.bot.send_message(chat_id=chat_id, text=msg, reply_markup=kb)
+
         elif data == "test_speed":
             await self.bot.edit_message_text(
                 chat_id=chat_id,
@@ -492,6 +575,30 @@ class BaleBotHandlers:
                 text=f"✅ <b>شماره سریال برگ سبز ثبت شد:</b> <code>{text}</code>",
                 reply_markup=self.get_main_keyboard(await get_user(chat_id))
             )
+
+        elif state == "AWAIT_REAL_OTP":
+            otp_input = text.strip()
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text="⏳ <b>در حال اعتبارسنجی کد پیامکی در سرور کارخانه...</b>"
+            )
+            verify_res = await self.sniper.verify_real_otp(chat_id, otp_input)
+            if verify_res.get("ok"):
+                await set_state(chat_id, "IDLE")
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "🎉 <b>احراز هویت واقعی با موفقیت انجام شد!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "نشست شما در سایت به صورت رسمی فعال شد. اکنون ربات با هویت تایید شده شما می‌تواند در کسری از ثانیه لاستیک دولتی را برایتان شکار و رزرو کند."
+                    ),
+                    reply_markup=self.get_main_keyboard(await get_user(chat_id))
+                )
+            else:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ <b>{verify_res.get('message')}</b>\nلطفاً کد صحیح را مجدداً ارسال فرمایید یا جهت انصراف /start بزنید:"
+                )
         else:
             await self.bot.send_message(
                 chat_id=chat_id,

@@ -30,7 +30,8 @@
 - [tire_api/market_price_client.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/tire_api/market_price_client.py): موتور هوشمند استعلام زنده قیمت روز تایر آزاد
 - [tire_api/sniper_engine.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/tire_api/sniper_engine.py): هسته مرکزی اسکن هم‌زمان و شکارچی چندپورتالی
 - [bot_handlers.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/bot_handlers.py): رابط دکمه‌ای متقارن، زیبا و مدیریت تعامل با کاربر
-- [main.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/main.py): نقطه شروع، وب‌سرور سلامت و حلقه اصلی دریافت پیام‌ها
+- [main.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/main.py): نقطه شروع، وب‌سرور سلامت و مانیتورینگ (`/status`)، لاگ چرخان و حلقه دریافت پیام‌ها
+- [monitor_realtime.py](file:///C:/Users/adltarabar/.gemini/antigravity/scratch/bale-tire-bot/monitor_realtime.py): سرویس مانیتورینگ لحظه‌ای سلامت، رویدادها و هشدار خطاها
 
 ---
 

@@ -2,7 +2,7 @@ import html
 import re
 import logging
 from typing import Dict, Any, Optional, List
-from database import get_user, upsert_user, set_state
+from database import get_user, upsert_user, set_state, log_action
 from bale_api import BaleBotClient
 from config import PORTALS, CAR_HINT_FOR_SIZE, MARKET_TIRE_SIZES
 from tire_api.sniper_engine import SniperEngine
@@ -104,7 +104,10 @@ class BaleBotHandlers:
         if not res.get("ok"):
             err = str(res.get("description") or res.get("error") or "").lower()
             if "not modified" not in err:
-                await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+                logger.warning(f"editMessageText fallback send_message chat={chat_id}: {res}")
+                send_res = await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+                if not send_res.get("ok"):
+                    logger.error(f"sendMessage failed chat={chat_id}: {send_res}")
 
     async def handle_start(self, chat_id: int, username: str = ""):
         user = await get_user(chat_id)
@@ -142,6 +145,8 @@ class BaleBotHandlers:
         }
 
         if not report.get("ok") or report.get("total_found", 0) == 0:
+            logger.warning(f"[MARKET_PRICE] chat={chat_id} size={norm} EMPTY/FAIL srcs={report.get('source_counts')} status={report.get('source_status')}")
+            await log_action(chat_id, "MARKET_PRICE", "EMPTY", f"size={norm} srcs={report.get('source_counts')}", report.get("latency_ms", 0.0))
             fail_txt = (
                 f"⚠️ <b>نتیجه دقیقی برای سایز <code>{escape_html(norm)}</code> یافت نشد!</b>\n\n"
                 "لطفاً مطمئن شوید سایز را صحیح وارد کرده‌اید (مثلاً <code>185/65R14</code> یا <code>205/60R15</code>) و دوباره تلاش کنید."
@@ -234,6 +239,18 @@ class BaleBotHandlers:
         msg_text = "\n".join(lines)
         if len(msg_text) > 3950:
             msg_text = msg_text[:3900] + "\n..."
+
+        logger.info(
+            f"[MARKET_PRICE] chat={chat_id} size={report['size']} total={report['total_found']} "
+            f"srcs={sc} latency={report['latency_ms']}ms cached={report.get('cached', False)}"
+        )
+        await log_action(
+            chat_id,
+            "MARKET_PRICE",
+            "OK",
+            f"size={report['size']} total={report['total_found']} srcs={sc}",
+            report.get("latency_ms", 0.0),
+        )
 
         if edit_msg_id:
             await self._safe_edit(chat_id, edit_msg_id, msg_text, reply_markup=kb)
@@ -382,6 +399,10 @@ class BaleBotHandlers:
                     [{"text": "🔙 بازگشت به لیست شرکت‌ها", "callback_data": "menu_portal"}],
                 ]
             }
+            ok_portals = [st["portal"] for st in scan["portals_status"] if st.get("ok")]
+            in_stock_cnt = len(scan.get("all_in_stock_items", []))
+            logger.info(f"[PORTALS_HEALTH] chat={chat_id} ok={len(ok_portals)}/10 in_stock={in_stock_cnt}")
+            await log_action(chat_id, "PORTALS_HEALTH", "OK", f"online={len(ok_portals)}/10 in_stock={in_stock_cnt}", 0.0)
             await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup=kb)
 
         elif data in ("menu_size", "menu_size_catalog"):
@@ -452,6 +473,8 @@ class BaleBotHandlers:
 
             lines.append(f"🎯 <b>سایز فعلی شما:</b> <code>{escape_html(self._format_size_label(current_size))}</code> (<b>{count} حلقه</b>)")
             lines.append("👇 برای انتخاب روی سایز کلیک کنید:")
+            logger.info(f"[MENU_SIZE] chat={chat_id} portal={cur_portal} live_sizes={len(avail)} catalog_sizes={len(cat_sizes)}")
+            await log_action(chat_id, "MENU_SIZE", "OK", f"portal={cur_portal} live_sizes={len(avail)} catalog={len(cat_sizes)}", 0.0)
             await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": rows})
 
         elif data.startswith("set_size_"):
@@ -607,6 +630,17 @@ class BaleBotHandlers:
                     [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
+            logger.info(
+                f"[STOCK_CHECK] chat={chat_id} portal={stock_info['portal']} size={stock_info['tire_size']} "
+                f"matched={len(matched)} total_avail_sizes={len(all_avail)}"
+            )
+            await log_action(
+                chat_id,
+                "STOCK_CHECK",
+                "IN_STOCK" if matched else "OUT_OF_STOCK",
+                f"portal={stock_info['portal']} size={stock_info['tire_size']} matched={len(matched)} avail_sizes={len(all_avail)}",
+                0.0,
+            )
             await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup=kb)
 
         elif data == "auth_real_otp":
@@ -644,6 +678,14 @@ class BaleBotHandlers:
                 f"📲 <b>در حال ارسال درخواست پیامک از {PORTALS.get(otp_portal, {}).get('short', otp_portal)} به {user.get('mobile')}...</b>",
             )
             res = await self.sniper.request_real_otp(chat_id, portal_override=otp_portal)
+            logger.info(f"[OTP_SEND] chat={chat_id} portal={otp_portal} ok={res.get('ok')} latency={res.get('latency_ms', 0)}ms")
+            await log_action(
+                chat_id,
+                "OTP_SEND",
+                "OK" if res.get("ok") else "FAIL",
+                f"portal={otp_portal} msg={res.get('message', '')[:80]}",
+                res.get("latency_ms", 0.0),
+            )
             if res.get("ok"):
                 await set_state(chat_id, f"AWAIT_REAL_OTP_{otp_portal.upper()}")
                 kb = {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "main_menu"}]]}

@@ -15,18 +15,22 @@ class BarezTireClient(BaseTireClient):
     """
     def __init__(self, base_url: str = "https://shop.barez.org"):
         super().__init__(base_url)
+        self._csrf_lock = asyncio.Lock()
 
-    async def init_session(self) -> Dict[str, Any]:
+    async def init_session(self, force: bool = False) -> Dict[str, Any]:
         """دریافت سشن اولیه و استخراج توکن ضدجعل CSRF از تگ‌های متای صفحه اصلی"""
-        res = await self.request("GET", "/start-live")
-        if res.get("ok"):
-            html = res.get("text", "")
-            soup = BeautifulSoup(html, "html.parser")
-            meta_csrf = soup.find("meta", {"name": "csrf-token"})
-            if meta_csrf and meta_csrf.get("content"):
-                self.csrf_token = meta_csrf["content"]
-                logger.info(f"Barez CSRF initialized: {self.csrf_token[:10]}...")
-        return res
+        async with self._csrf_lock:
+            if self.csrf_token and not force:
+                return {"ok": True, "cached": True}
+            res = await self.request("GET", "/start-live")
+            if res.get("ok"):
+                html = res.get("text", "")
+                soup = BeautifulSoup(html, "html.parser")
+                meta_csrf = soup.find("meta", {"name": "csrf-token"})
+                if meta_csrf and meta_csrf.get("content"):
+                    self.csrf_token = meta_csrf["content"]
+                    logger.info(f"Barez CSRF initialized: {self.csrf_token[:10]}...")
+            return res
 
     async def send_login_otp(self, phone: str) -> Dict[str, Any]:
         """ارسال واقعی کد یکبار مصرف پیامکی به تلفن همراه کاربر (/customer/verifylogin)"""

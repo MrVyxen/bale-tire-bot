@@ -127,8 +127,15 @@ class BaleBotClient:
         if offset is not None:
             params["offset"] = offset
         try:
-            async with session.get(f"{self.base_url}/getUpdates", params=params) as resp:
+            async with session.get(
+                f"{self.base_url}/getUpdates",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=timeout + 10, connect=8),
+            ) as resp:
                 return await resp.json()
+        except aiohttp.ServerDisconnectedError:
+            logger.debug("Bale long-polling connection reset cleanly; reconnecting...")
+            return {"ok": True, "result": []}
         except Exception as e:
             logger.error(f"Error fetching updates: {e}")
-            return {"ok": False, "result": []}
+            return {"ok": False, "result": [], "error": str(e)}

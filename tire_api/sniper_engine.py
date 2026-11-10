@@ -2,6 +2,7 @@ import asyncio
 import time
 import io
 import logging
+from PIL import Image
 from typing import Dict, Any, Optional
 from database import get_user, upsert_user, log_action
 from bale_api import BaleBotClient

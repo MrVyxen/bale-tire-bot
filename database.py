@@ -15,7 +15,7 @@ async def init_db():
                 car_vin TEXT,
                 chassis_no TEXT,
                 green_sheet_no TEXT,
-                target_portal TEXT DEFAULT 'kavir',
+                target_portal TEXT DEFAULT 'barez',
                 target_tire_size TEXT DEFAULT '185_65_14',
                 tire_count INTEGER DEFAULT 2,
                 sniper_enabled INTEGER DEFAULT 0,

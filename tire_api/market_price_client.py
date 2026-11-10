@@ -1,10 +1,13 @@
 import asyncio
+import json
 import logging
 import re
 import time
 from typing import Dict, Any, List, Optional
 import aiohttp
 from config import DEFAULT_HEADERS
+from database import record_market_price_snapshot
+from telemetry import telemetry
 from tire_api.hypertire_client import HyperTireClient
 from tire_api.utils import (
     clean_search_text,
@@ -340,14 +343,23 @@ class MarketPriceClient:
 
         t0 = time.perf_counter()
 
-        torob_task = self._fetch_torob_offers(norm_size, w, a, r)
-        dk_task = self._fetch_digikala_offers(norm_size, w, a, r)
-        basalam_task = self._fetch_basalam_offers(norm_size, w, a, r)
-        ht_task = self._fetch_hypertire_offers(norm_size)
+        async def _timed(coro):
+            s_t0 = time.perf_counter()
+            res_val = await coro
+            return res_val, round((time.perf_counter() - s_t0) * 1000, 1)
 
-        torob_res, dk_list, basalam_list, ht_list = await asyncio.gather(
-            torob_task, dk_task, basalam_task, ht_task, return_exceptions=True
+        torob_pair, dk_pair, basalam_pair, ht_pair = await asyncio.gather(
+            _timed(self._fetch_torob_offers(norm_size, w, a, r)),
+            _timed(self._fetch_digikala_offers(norm_size, w, a, r)),
+            _timed(self._fetch_basalam_offers(norm_size, w, a, r)),
+            _timed(self._fetch_hypertire_offers(norm_size)),
+            return_exceptions=True,
         )
+
+        torob_res, torob_lat = torob_pair if isinstance(torob_pair, tuple) else (([], "error"), 0.0)
+        dk_list, dk_lat = dk_pair if isinstance(dk_pair, tuple) else (None, 0.0)
+        basalam_list, basalam_lat = basalam_pair if isinstance(basalam_pair, tuple) else (None, 0.0)
+        ht_list, ht_lat = ht_pair if isinstance(ht_pair, tuple) else (None, 0.0)
 
         torob_list: List[Dict[str, Any]] = []
         torob_status = "error"
@@ -361,6 +373,12 @@ class MarketPriceClient:
             "دیجی‌کالا": "ok" if isinstance(dk_list, list) else "error",
             "باسلام": "ok" if isinstance(basalam_list, list) else "error",
             "هایپرتایر": "ok" if isinstance(ht_list, list) else "error",
+        }
+        source_latencies: Dict[str, float] = {
+            "ترب": torob_lat,
+            "دیجی‌کالا": dk_lat,
+            "باسلام": basalam_lat,
+            "هایپرتایر": ht_lat,
         }
 
         for s_name, batch in (
@@ -434,6 +452,7 @@ class MarketPriceClient:
             "cached": False,
             "source_counts": source_counts,
             "source_status": source_status,
+            "source_latencies": source_latencies,
             "total_found": len(ir_confirmed) + len(imp_confirmed) + len(unspecified),
             "ir_summary": ir_summary,
             "imp_summary": imp_summary,
@@ -441,6 +460,34 @@ class MarketPriceClient:
             "imp_offers": imp_confirmed,
             "unspecified_offers": unspecified,
         }
+        telemetry.record_market_query(
+            size=norm_size,
+            total_found=result["total_found"],
+            total_latency_ms=latency_ms,
+            source_details={
+                s: {
+                    "count": source_counts.get(s, 0),
+                    "status": source_status.get(s, "error"),
+                    "latency_ms": source_latencies.get(s, 0.0),
+                }
+                for s in ("دیجی‌کالا", "باسلام", "هایپرتایر", "ترب")
+            },
+            ir_median=ir_summary["median_unit"] if ir_summary else None,
+            imp_median=imp_summary["median_unit"] if imp_summary else None,
+        )
         if result["total_found"] > 0:
             self._price_cache[norm_size] = (time.monotonic() + 60.0, result)
+            try:
+                await record_market_price_snapshot(
+                    tire_size=norm_size,
+                    ir_min=ir_summary["min_unit"] if ir_summary else None,
+                    ir_med=ir_summary["median_unit"] if ir_summary else None,
+                    imp_min=imp_summary["min_unit"] if imp_summary else None,
+                    imp_med=imp_summary["median_unit"] if imp_summary else None,
+                    total_offers=result["total_found"],
+                    sources_json=json.dumps(source_counts, ensure_ascii=False),
+                    tehran_time=now_info["compact_fa"],
+                )
+            except Exception as e:
+                logger.debug(f"Price history snapshot skip: {e}")
         return result

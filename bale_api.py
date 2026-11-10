@@ -1,7 +1,10 @@
+import asyncio
+import time
 import aiohttp
 import logging
 from typing import Optional, Dict, Any, List, Union
 from config import BALE_BASE_URL
+from telemetry import redact_secrets, telemetry
 
 logger = logging.getLogger("BaleAPI")
 
@@ -38,13 +41,23 @@ class BaleBotClient:
                 async with session.post(url, json=data or {}) as resp:
                     return await resp.json()
         except Exception as e:
-            logger.error(f"Error calling {method}: {e}")
-            return {"ok": False, "error": str(e)}
+            err_str = redact_secrets(f"{type(e).__name__}: {e}")
+            logger.error(f"Error calling {method}: {err_str}")
+            telemetry.record_error("bale_api", type(e).__name__, f"{method}: {err_str}")
+            return {"ok": False, "error": err_str}
 
     async def get_me(self) -> Dict[str, Any]:
         session = await self.get_session()
-        async with session.get(f"{self.base_url}/getMe") as resp:
-            return await resp.json()
+        t0 = time.perf_counter()
+        async with session.get(f"{self.base_url}/getMe", timeout=aiohttp.ClientTimeout(total=12, connect=8)) as resp:
+            data = await resp.json()
+            lat = round((time.perf_counter() - t0) * 1000, 1)
+            if data.get("ok"):
+                res = data.get("result") or {}
+                telemetry.record_bale_health(True, lat, res.get("username", ""), res.get("first_name", ""))
+            else:
+                telemetry.record_bale_health(False, lat)
+            return data
 
     async def send_message(
         self,
@@ -133,9 +146,12 @@ class BaleBotClient:
                 timeout=aiohttp.ClientTimeout(total=timeout + 10, connect=8),
             ) as resp:
                 return await resp.json()
-        except aiohttp.ServerDisconnectedError:
-            logger.debug("Bale long-polling connection reset cleanly; reconnecting...")
+        except (aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
+            logger.debug(f"Bale long-polling cycle ended ({type(e).__name__}); reconnecting...")
+            telemetry.record_polling_reconnect(type(e).__name__)
             return {"ok": True, "result": []}
         except Exception as e:
-            logger.error(f"Error fetching updates: {e}")
-            return {"ok": False, "result": [], "error": str(e)}
+            err_str = redact_secrets(f"{type(e).__name__}: {e}")
+            logger.error(f"Error fetching updates: {err_str}")
+            telemetry.record_error("bale_polling", type(e).__name__, err_str)
+            return {"ok": False, "result": [], "error": err_str, "_recorded": True}

@@ -2,15 +2,15 @@ import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-import re
 import time
-from collections import deque
 from aiohttp import web
-from config import BASE_DIR, BOT_TOKEN
-from database import init_db, get_all_active_snipers
+from config import BASE_DIR
+from database import get_analytics_summary, get_all_active_snipers, init_db
 from bale_api import BaleBotClient
+from dashboard_html import DASHBOARD_HTML
+from telemetry import redact_secrets, telemetry
 from tire_api.sniper_engine import SniperEngine
-from tire_api.utils import get_tehran_now, normalize_tire_size, persian_to_english_digits
+from tire_api.utils import normalize_tire_size, persian_to_english_digits
 from bot_handlers import BaleBotHandlers
 
 LOG_FILE = BASE_DIR / "bot_monitor.log"
@@ -23,24 +23,20 @@ _file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCo
 _file_handler.setFormatter(_fmt)
 
 logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
-# جلوگیری از شلوغ‌شدن لاگ توسط درخواست‌های هر چند ثانیه /status و /health
+# جلوگیری از شلوغ‌شدن لاگ توسط درخواست‌های رفرش داشبورد و مانیتور
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger("Main")
 
-BOT_METRICS = {
-    "started_monotonic": time.monotonic(),
-    "started_tehran": get_tehran_now()["full_fa"],
-    "bot_username": "",
-    "connected": False,
-    "total_updates": 0,
-    "total_messages": 0,
-    "total_callbacks": 0,
-    "total_errors": 0,
-    "last_event_at": None,
-    "last_error": None,
-    "recent_events": deque(maxlen=40),
-}
 _sniper_engine_ref: SniperEngine | None = None
+_db_cache: tuple[float, dict] = (0.0, {})
+
+
+async def _get_cached_db_analytics() -> dict:
+    global _db_cache
+    now = time.monotonic()
+    if now - _db_cache[0] >= 5.0:
+        _db_cache = (now, await get_analytics_summary())
+    return _db_cache[1]
 
 
 async def health_check_handler(request):
@@ -54,31 +50,19 @@ async def health_check_handler(request):
 
 
 async def status_handler(request):
-    """اندپوینت مانیتورینگ لحظه‌ای JSON برای پایش مداوم ربات"""
+    """اندپوینت JSON تله‌متری و آنالیز دقیق"""
     active_snipers = []
     if _sniper_engine_ref:
         active_snipers = [
             cid for cid, t in _sniper_engine_ref.running_tasks.items() if not t.done()
         ]
-    uptime_sec = round(time.monotonic() - BOT_METRICS["started_monotonic"], 1)
-    payload = {
-        "status": "ok" if BOT_METRICS["connected"] else "connecting",
-        "tehran_now": get_tehran_now()["full_fa"],
-        "started_tehran": BOT_METRICS["started_tehran"],
-        "uptime_sec": uptime_sec,
-        "bot_username": BOT_METRICS["bot_username"],
-        "connected": BOT_METRICS["connected"],
-        "total_updates": BOT_METRICS["total_updates"],
-        "total_messages": BOT_METRICS["total_messages"],
-        "total_callbacks": BOT_METRICS["total_callbacks"],
-        "total_errors": BOT_METRICS["total_errors"],
-        "active_snipers_count": len(active_snipers),
-        "active_snipers": active_snipers,
-        "last_event_at": BOT_METRICS["last_event_at"],
-        "last_error": BOT_METRICS["last_error"],
-        "recent_events": list(BOT_METRICS["recent_events"]),
-    }
-    return web.json_response(payload)
+    db_analytics = await _get_cached_db_analytics()
+    return web.json_response(telemetry.build_snapshot(active_snipers=active_snipers, db_analytics=db_analytics))
+
+
+async def dashboard_handler(request):
+    """داشبورد گرافیکی رصد و آنالیز لحظه‌ای ربات"""
+    return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
 
 
 async def start_web_server():
@@ -87,12 +71,13 @@ async def start_web_server():
     app.router.add_get("/", health_check_handler)
     app.router.add_get("/health", health_check_handler)
     app.router.add_get("/status", status_handler)
+    app.router.add_get("/dashboard", dashboard_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Render Web Health Server listening on 0.0.0.0:{port}")
+    logger.info(f"Render Web & Analytics Server listening on 0.0.0.0:{port} (/dashboard, /status)")
     return runner
 
 
@@ -108,46 +93,29 @@ def _safe_event_label(kind: str, payload: dict) -> str:
     sz = normalize_tire_size(raw_txt)
     if sz:
         return f"size={sz}"
-    # محافظت از افشای اطلاعات حساس کاربر (کد ملی، موبایل، پلاک، کد تایید) در فایل لاگ
     return f"text(len={len(raw_txt)})"
 
 
 async def _dispatch_safely(chat_id: int, kind: str, coro_fn, payload):
     lock = _chat_locks.setdefault(chat_id, asyncio.Lock())
     label = _safe_event_label(kind, payload)
-    BOT_METRICS["total_updates"] += 1
-    if kind == "CB":
-        BOT_METRICS["total_callbacks"] += 1
-    else:
-        BOT_METRICS["total_messages"] += 1
+    telemetry.record_update_start(kind, chat_id)
 
     t0 = time.perf_counter()
     logger.info(f"[IN][{kind}] chat={chat_id} {label}")
     async with lock:
-        status = "OK"
+        ok = True
         err_msg = ""
         try:
             await coro_fn(payload)
         except Exception as e:
-            status = "ERR"
-            err_msg = str(e)
-            BOT_METRICS["total_errors"] += 1
-            BOT_METRICS["last_error"] = f"{get_tehran_now()['time_hms']} {kind} chat={chat_id}: {e}"
+            ok = False
+            err_msg = f"{type(e).__name__}: {e}"
             logger.exception(f"Unhandled error in update handler [{kind}] chat_id={chat_id} {label}")
         finally:
             lat = round((time.perf_counter() - t0) * 1000, 1)
-            now_hms = get_tehran_now()["time_hms"]
-            BOT_METRICS["last_event_at"] = now_hms
-            BOT_METRICS["recent_events"].appendleft({
-                "time": now_hms,
-                "chat_id": chat_id,
-                "kind": kind,
-                "label": label,
-                "status": status,
-                "latency_ms": lat,
-                **({"error": err_msg} if err_msg else {}),
-            })
-            logger.info(f"[OUT][{kind}] chat={chat_id} {label} status={status} elapsed={lat}ms")
+            telemetry.record_update_finish(kind, chat_id, label, lat, ok=ok, error_msg=err_msg)
+            logger.info(f"[OUT][{kind}] chat={chat_id} {label} status={'OK' if ok else 'ERR'} elapsed={lat}ms")
 
 
 async def bot_polling_worker(bot_client: BaleBotClient, handlers: BaleBotHandlers):
@@ -171,29 +139,59 @@ async def bot_polling_worker(bot_client: BaleBotClient, handlers: BaleBotHandler
                         cid = cq.get("message", {}).get("chat", {}).get("id", 0)
                         asyncio.create_task(_dispatch_safely(cid, "CB", handlers.handle_callback_query, cq))
             else:
-                BOT_METRICS["total_errors"] += 1
-                BOT_METRICS["last_error"] = f"{get_tehran_now()['time_hms']} getUpdates: {updates}"
+                if not updates.get("_recorded"):
+                    telemetry.record_error("bale_polling", "BadResponse", str(updates))
                 logger.warning(f"Bale getUpdates response: {updates}")
                 await asyncio.sleep(3)
         except Exception as e:
-            BOT_METRICS["total_errors"] += 1
-            BOT_METRICS["last_error"] = f"{get_tehran_now()['time_hms']} polling: {e}"
-            logger.error(f"Polling error: {e}")
+            safe_err = redact_secrets(e)
+            telemetry.record_error("bale_polling", type(e).__name__, safe_err)
+            logger.error(f"Polling error: {type(e).__name__}: {safe_err}")
             await asyncio.sleep(3)
         await asyncio.sleep(0.1)
+
+
+async def active_analytics_worker(bot_client: BaleBotClient, sniper_engine: SniperEngine):
+    """
+    پروب سبک و هوشمند هر ۱۸۰ ثانیه:
+    - اندازه‌گیری پینگ زنده سرور بله (getMe)
+    - رصد سلامت و موجودی کارخانه‌های تایر دولتی برای به‌روز نگه‌داشتن داشبورد آنالیز
+    """
+    await asyncio.sleep(2.0)
+    while True:
+        try:
+            await bot_client.get_me()
+        except Exception as e:
+            telemetry.record_bale_health(False, 0.0)
+            telemetry.record_error("active_probe", type(e).__name__, f"getMe: {redact_secrets(e)}")
+
+        try:
+            scan = await sniper_engine.scan_all_portals_live("all")
+            online_cnt = sum(1 for p in scan["portals_status"] if p.get("ok"))
+            stock_cnt = len(scan.get("all_in_stock_items", []))
+            sizes = sorted(b["size"] for b in scan.get("available_sizes", {}).values())
+            logger.info(
+                f"[ACTIVE_PROBE] portals_online={online_cnt}/10 in_stock={stock_cnt} sizes={sizes}"
+            )
+        except Exception as e:
+            telemetry.record_error("active_probe", type(e).__name__, f"portal_scan: {e}")
+            logger.warning(f"Active portal probe error: {type(e).__name__}: {e}")
+
+        await asyncio.sleep(180.0)
 
 
 async def run_bot():
     global _sniper_engine_ref
     logger.info("Initializing Tire Sniper Bot for Bale...")
 
-    # ۱. راه‌اندازی فوری وب‌سرور و اندپوینت مانیتورینگ /status
+    # ۱. راه‌اندازی فوری وب‌سرور و داشبورد آنالیز (/dashboard و /status)
     web_runner = await start_web_server()
 
     # ۲. راه‌اندازی دیتابیس
     try:
         await init_db()
     except Exception as e:
+        telemetry.record_error("database", type(e).__name__, str(e))
         logger.error(f"DB init warning: {e}")
 
     # ۳. اتصال به بله با قابلیت تلاش مجدد مداوم
@@ -204,14 +202,12 @@ async def run_bot():
             if me.get("ok"):
                 bot_info = me.get("result", {})
                 uname = bot_info.get("username", "")
-                BOT_METRICS["connected"] = True
-                BOT_METRICS["bot_username"] = uname
                 logger.info(f"Bot connected successfully: @{uname} ({bot_info.get('first_name')})")
                 break
             else:
                 logger.warning(f"Connecting to Bale attempt {attempt}/10 failed: {me}")
         except Exception as e:
-            logger.warning(f"Connection attempt {attempt}/10 error: {e}")
+            logger.warning(f"Connection attempt {attempt}/10 error: {type(e).__name__}: {redact_secrets(e)}")
         await asyncio.sleep(3)
 
     sniper_engine = SniperEngine(bot_client)
@@ -228,8 +224,9 @@ async def run_bot():
     except Exception as e:
         logger.error(f"Sniper restore error: {e}")
 
-    # اجرای پیوسته Polling
+    # اجرای پیوسته Polling و پروب آنالیز زنده
     polling_task = asyncio.create_task(bot_polling_worker(bot_client, handlers))
+    probe_task = asyncio.create_task(active_analytics_worker(bot_client, sniper_engine))
 
     try:
         while True:
@@ -238,6 +235,7 @@ async def run_bot():
         logger.info("Shutting down bot...")
     finally:
         polling_task.cancel()
+        probe_task.cancel()
         await sniper_engine.close_all()
         await bot_client.close()
         await web_runner.cleanup()

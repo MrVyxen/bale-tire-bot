@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from config import PORTALS
 from database import get_user, upsert_user, log_action
 from bale_api import BaleBotClient
+from telemetry import telemetry
 from tire_api.hypertire_client import HyperTireClient
 from tire_api.barez_client import BarezTireClient
 from tire_api.kavir_client import KavirTireClient
@@ -127,7 +128,20 @@ class SniperEngine:
         for res in results:
             if isinstance(res, dict):
                 portals_status.append(res)
-                all_in_stock_items.extend(res.get("in_stock_items", []))
+                in_stock = res.get("in_stock_items", [])
+                all_in_stock_items.extend(in_stock)
+                in_stock_sizes = [it.get("size", "") for it in in_stock if it.get("size")]
+                telemetry.record_portal_probe(
+                    portal_key=res.get("portal", ""),
+                    title=res.get("title", ""),
+                    ok=bool(res.get("ok", False)),
+                    latency_ms=float(res.get("latency_ms", 0.0)),
+                    in_stock_count=len(in_stock),
+                    vpn_blocked=bool(res.get("vpn_blocked", False)),
+                    anti_bot=bool(res.get("anti_bot", False)),
+                    status_desc=res.get("status_desc", ""),
+                    in_stock_sizes=in_stock_sizes,
+                )
                 for cs in res.get("catalog_sizes", []):
                     norm = normalize_tire_size(cs) or cs
                     catalog_sizes_set.add(norm)

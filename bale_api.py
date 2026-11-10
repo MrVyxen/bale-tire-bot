@@ -51,16 +51,22 @@ class BaleBotClient:
         chat_id: Union[int, str],
         text: str,
         reply_markup: Optional[Dict[str, Any]] = None,
-        parse_mode: str = "HTML"
+        parse_mode: Optional[str] = "HTML"
     ) -> Dict[str, Any]:
-        payload = {
+        payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": parse_mode
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        return await self._post("sendMessage", payload)
+        res = await self._post("sendMessage", payload)
+        if not res.get("ok") and parse_mode:
+            logger.warning(f"sendMessage failed with parse_mode={parse_mode}: {res}; retrying plain text")
+            payload.pop("parse_mode", None)
+            res = await self._post("sendMessage", payload)
+        return res
 
     async def edit_message_text(
         self,
@@ -68,17 +74,25 @@ class BaleBotClient:
         message_id: int,
         text: str,
         reply_markup: Optional[Dict[str, Any]] = None,
-        parse_mode: str = "HTML"
+        parse_mode: Optional[str] = "HTML"
     ) -> Dict[str, Any]:
-        payload = {
+        payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
-            "parse_mode": parse_mode
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        return await self._post("editMessageText", payload)
+        res = await self._post("editMessageText", payload)
+        if not res.get("ok"):
+            desc = str(res.get("description") or "").lower()
+            if parse_mode and ("parse" in desc or "entity" in desc or "html" in desc or "tag" in desc):
+                logger.warning(f"editMessageText HTML parse error: {res}; retrying plain text")
+                payload.pop("parse_mode", None)
+                res = await self._post("editMessageText", payload)
+        return res
 
     async def send_photo(
         self,

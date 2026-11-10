@@ -133,6 +133,7 @@ async def run_bot():
         logger.info("Shutting down bot...")
     finally:
         polling_task.cancel()
+        await sniper_engine.close_all()
         await bot_client.close()
         await web_runner.cleanup()
         logger.info("Bot and Web Server stopped.")

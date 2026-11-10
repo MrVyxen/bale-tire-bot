@@ -1,8 +1,10 @@
+import asyncio
 import re
 import logging
 from typing import Dict, Any, Optional, List
 from bs4 import BeautifulSoup
 from tire_api.base_client import BaseTireClient
+from tire_api.utils import clean_search_text, normalize_tire_size, size_to_key
 
 logger = logging.getLogger("BarezClient")
 
@@ -106,24 +108,69 @@ class BarezTireClient(BaseTireClient):
         if res.get("ok"):
             html = res.get("data", {}).get("html", "") or res.get("text", "")
             if "اتمام موجودی" not in html and ("change-product-count" in html or "reserve-check" in html):
-                is_out_of_stock = False
-                status_desc = "سهمیه باز است! موجودی فعال یافت شد."
-                # استخراج اطلاعات تایرها از HTML
                 soup = BeautifulSoup(html, "html.parser")
                 for select in soup.find_all("select", class_=re.compile(r"change-product-count")):
                     p_id = select.get("data-id") or select.get("name")
-                    price = select.get("data-price", "0")
+                    price_raw = clean_search_text(str(select.get("data-price", "0")))
+                    price_val = int(re.sub(r"\D", "", price_raw) or 0)
+                    parent_txt = clean_search_text(select.parent.parent.get_text(" ", strip=True) if select.parent and select.parent.parent else "")
+                    found_sz = normalize_tire_size(parent_txt) or normalize_tire_size(size_keyword) or f"رینگ {ring}"
                     items.append({
                         "id": p_id,
-                        "price": price,
+                        "portal": "barez",
+                        "portal_title": "گروه صنعتی بارز",
+                        "brand": "بارز",
+                        "price": price_val,
+                        "price_toman": price_val // 10 if price_val > 50_000_000 else price_val,
                         "ring": ring,
-                        "title": f"تایر رینگ {ring} بارز"
+                        "size": found_sz,
+                        "size_key": size_to_key(found_sz),
+                        "title": parent_txt[:100] or f"تایر رینگ {ring} بارز",
+                        "in_stock": True,
+                        "url": f"{self.base_url}/start-live",
                     })
+                if items:
+                    is_out_of_stock = False
+                    status_desc = f"سهمیه بارز باز است! ({len(items)} مدل موجود)"
 
         res["items"] = items
         res["is_out_of_stock"] = is_out_of_stock
         res["status_desc"] = status_desc
         return res
+
+    async def scan_all_rings(self) -> Dict[str, Any]:
+        """بررسی هم‌زمان موجودی تمامی سایزهای رینگ ۱۳ تا ۱۸ در سامانه فروش بارز"""
+        if not self.csrf_token:
+            await self.init_session()
+
+        rings = ["13", "14", "15", "16", "17", "18"]
+        results = await asyncio.gather(
+            *[self.check_available_products(f"000_00_{r}") for r in rings],
+            return_exceptions=True,
+        )
+        all_items: List[Dict[str, Any]] = []
+        ok_any = False
+        latencies: List[float] = []
+        for r in results:
+            if isinstance(r, dict):
+                if r.get("ok"):
+                    ok_any = True
+                if r.get("latency_ms"):
+                    latencies.append(float(r["latency_ms"]))
+                all_items.extend(r.get("items", []))
+
+        avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else 0.0
+        return {
+            "ok": ok_any,
+            "latency_ms": avg_lat,
+            "in_stock_items": all_items,
+            "is_out_of_stock": len(all_items) == 0,
+            "status_desc": (
+                f"سهمیه بارز باز است! ({len(all_items)} محصول موجود در رینگ‌های مختلف)"
+                if all_items
+                else "در این لحظه کل ظرفیت بارز در حالت «اتمام موجودی» است"
+            ),
+        }
 
     async def fast_reserve_tire(
         self,

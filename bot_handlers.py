@@ -99,7 +99,10 @@ class BaleBotHandlers:
             "💡 <i>نکته هوشمند: می‌توانید هر سایز دلخواهی مثل <code>185/65R14</code> را همین‌جا تایپ کنید تا قیمت لحظه‌ای بازار آزاد را بگیرید.</i>"
         )
 
-    async def _safe_edit(self, chat_id: int, message_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None):
+    async def _safe_edit(self, chat_id: int, message_id: Optional[int], text: str, reply_markup: Optional[Dict[str, Any]] = None):
+        if not message_id:
+            await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            return
         res = await self.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
         if not res.get("ok"):
             err = str(res.get("description") or res.get("error") or "").lower()
@@ -108,6 +111,21 @@ class BaleBotHandlers:
                 send_res = await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
                 if not send_res.get("ok"):
                     logger.error(f"sendMessage failed chat={chat_id}: {send_res}")
+
+    @staticmethod
+    def _profile_saved_keyboard() -> Dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "✏️ تکمیل سایر مدارک", "callback_data": "menu_profile"},
+                    {"text": "📋 شناسنامه من", "callback_data": "view_profile"},
+                ],
+                [
+                    {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
+                    {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                ],
+            ]
+        }
 
     async def handle_start(self, chat_id: int, username: str = ""):
         user = await get_user(chat_id)
@@ -140,18 +158,33 @@ class BaleBotHandlers:
                     {"text": "🔄 به‌روزرسانی همین ساعت", "callback_data": f"mktrefresh_{size_key}"},
                     {"text": "🔍 سایز دیگر", "callback_data": "menu_market_price"},
                 ],
-                [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                [
+                    {"text": "🎯 ثبت سایز برای شکارچی", "callback_data": f"set_size_{size_key}"},
+                    {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                ],
             ]
         }
 
         if not report.get("ok") or report.get("total_found", 0) == 0:
             logger.warning(f"[MARKET_PRICE] chat={chat_id} size={norm} EMPTY/FAIL srcs={report.get('source_counts')} status={report.get('source_status')}")
             await log_action(chat_id, "MARKET_PRICE", "EMPTY", f"size={norm} srcs={report.get('source_counts')}", report.get("latency_ms", 0.0))
+            fail_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔄 تلاش مجدد", "callback_data": f"mktrefresh_{size_key}"},
+                        {"text": "🔍 انتخاب سایز دیگر", "callback_data": "menu_market_price"},
+                    ],
+                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                ]
+            }
             fail_txt = (
                 f"⚠️ <b>نتیجه دقیقی برای سایز <code>{escape_html(norm)}</code> یافت نشد!</b>\n\n"
                 "لطفاً مطمئن شوید سایز را صحیح وارد کرده‌اید (مثلاً <code>185/65R14</code> یا <code>205/60R15</code>) و دوباره تلاش کنید."
             )
-            await self.bot.send_message(chat_id=chat_id, text=fail_txt, reply_markup=kb)
+            if edit_msg_id:
+                await self._safe_edit(chat_id, edit_msg_id, fail_txt, reply_markup=fail_kb)
+            else:
+                await self.bot.send_message(chat_id=chat_id, text=fail_txt, reply_markup=fail_kb)
             return
 
         ts = report["timestamp"]
@@ -263,16 +296,30 @@ class BaleBotHandlers:
         message_id = query.get("message", {}).get("message_id")
         data = query.get("data", "")
 
-        await self.bot.answer_callback_query(callback_id)
+        if callback_id:
+            await self.bot.answer_callback_query(callback_id)
 
+        await self._route_callback(chat_id, message_id, data)
+
+    async def _route_callback(self, chat_id: int, message_id: Optional[int], data: str):
         user = await get_user(chat_id)
         if not user:
             user = await upsert_user(chat_id)
 
+        # با زدن هر دکمه منو یا بازگشت، وضعیت انتظار تایپ قبلی به‌صورت خودکار پاک می‌شود
+        if user.get("state", "IDLE") != "IDLE" and not (
+            data.startswith("edit_") or data == "ask_custom_market_size" or data.startswith("otp_send_")
+        ):
+            await set_state(chat_id, "IDLE")
+            user["state"] = "IDLE"
+
         if data == "main_menu":
             await set_state(chat_id, "IDLE")
             text = self._build_dashboard_text(user, "داشبورد اصلی مدیریت تایر")
-            await self._safe_edit(chat_id, message_id, text, reply_markup=self.get_main_keyboard(user))
+            if message_id:
+                await self._safe_edit(chat_id, message_id, text, reply_markup=self.get_main_keyboard(user))
+            else:
+                await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=self.get_main_keyboard(user))
 
         elif data == "menu_profile":
             _, progress_bar = self.calculate_profile_completion(user)
@@ -365,7 +412,7 @@ class BaleBotHandlers:
             p = data.replace("set_portal_", "")
             if p in PORTALS:
                 await upsert_user(chat_id, target_portal=p)
-            await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": "menu_portal"})
+            await self._route_callback(chat_id, message_id, "menu_portal")
 
         elif data == "live_portals_health":
             await self._safe_edit(chat_id, message_id, "📡 <b>در حال بررسی اتصال زنده تمام ۱۰ کارخانه و درگاه دولتی...</b>")
@@ -504,7 +551,7 @@ class BaleBotHandlers:
         elif data.startswith("set_count_"):
             c = int(data.replace("set_count_", ""))
             await upsert_user(chat_id, tire_count=c)
-            await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": "menu_size"})
+            await self._route_callback(chat_id, message_id, "menu_size")
 
         elif data == "menu_market_price":
             rows: List[List[Dict[str, str]]] = []
@@ -578,14 +625,22 @@ class BaleBotHandlers:
                 await self.sniper.stop_sniper_for_user(chat_id)
             else:
                 if not user.get("national_id") or not user.get("mobile"):
-                    await self.bot.send_message(
-                        chat_id=chat_id,
-                        text="⚠️ <b>اطلاعات ناقص است!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو»، حداقل <b>کد ملی</b> و <b>شماره موبایل</b> را ثبت کنید.",
+                    miss_kb = {
+                        "inline_keyboard": [
+                            [{"text": "👤 تکمیل کد ملی و موبایل", "callback_data": "menu_profile"}],
+                            [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                        ]
+                    }
+                    await self._safe_edit(
+                        chat_id,
+                        message_id,
+                        "⚠️ <b>اطلاعات مدارک ناقص است!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو»، حداقل <b>کد ملی</b> و <b>شماره موبایل</b> را ثبت کنید.",
+                        reply_markup=miss_kb,
                     )
                     return
                 await upsert_user(chat_id, sniper_enabled=1)
                 await self.sniper.start_sniper_for_user(chat_id)
-            await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": "menu_sniper"})
+            await self._route_callback(chat_id, message_id, "menu_sniper")
 
         elif data == "live_check_stock":
             await self._safe_edit(chat_id, message_id, "📡 <b>در حال استعلام زنده و مستقیم موجودی از سایت‌های دولتی...</b>")
@@ -625,9 +680,16 @@ class BaleBotHandlers:
                 "inline_keyboard": [
                     [
                         {"text": "🔄 استعلام مجدد", "callback_data": "live_check_stock"},
-                        {"text": "🛞 انتخاب از سایزهای موجود", "callback_data": "menu_size"},
+                        {"text": "💰 قیمت آزاد این سایز", "callback_data": f"mkt_{stock_info['tire_size']}"},
                     ],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    [
+                        {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
+                        {"text": "🛞 تغییر سایز موجود", "callback_data": "menu_size"},
+                    ],
+                    [
+                        {"text": "🏭 تغییر شرکت هدف", "callback_data": "menu_portal"},
+                        {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    ],
                 ]
             }
             logger.info(
@@ -645,9 +707,17 @@ class BaleBotHandlers:
 
         elif data == "auth_real_otp":
             if not user.get("mobile"):
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text="⚠️ <b>شماره موبایل یافت نشد!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو» شماره همراه مالک را ثبت کنید.",
+                miss_kb = {
+                    "inline_keyboard": [
+                        [{"text": "👤 ثبت شماره موبایل", "callback_data": "menu_profile"}],
+                        [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    ]
+                }
+                await self._safe_edit(
+                    chat_id,
+                    message_id,
+                    "⚠️ <b>شماره موبایل یافت نشد!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو» شماره همراه مالک را ثبت کنید.",
+                    reply_markup=miss_kb,
                 )
                 return
             portal = user.get("target_portal", "all")
@@ -668,7 +738,7 @@ class BaleBotHandlers:
                     reply_markup=kb,
                 )
                 return
-            await self.handle_callback_query({"id": callback_id, "message": {"chat": {"id": chat_id}, "message_id": message_id}, "data": f"otp_send_{portal}"})
+            await self._route_callback(chat_id, message_id, f"otp_send_{portal}")
 
         elif data.startswith("otp_send_"):
             otp_portal = data.replace("otp_send_", "")
@@ -735,23 +805,54 @@ class BaleBotHandlers:
                 "2️⃣ <b>موجودی دولتی:</b> دکمه «🛞 سایزها» فقط بر اساس موجودی لحظه‌ای سایت‌ها به شما نمایش می‌دهد چه سایزی باز است.\n"
                 "3️⃣ <b>شکارچی خودکار:</b> روی «همه شرکت‌ها» بگذارید و روشن کنید تا تمام سایت‌های دولتی هم‌زمان رصد شوند.\n"
                 "4️⃣ <b>قیمت روز تایر آزاد:</b> با زدن «💰 قیمت روز تایر آزاد» یا تایپ مستقیم سایز (مثلاً <code>185/65R14</code>) نرخ همان ساعت را از فروشگاه‌های کشور بگیرید.\n\n"
+                "⌨️ <b>دستورات سریع متنی:</b>\n"
+                "<code>/start</code> منوی اصلی • <code>/stock</code> موجودی دولتی • <code>/price</code> قیمت آزاد • <code>/sniper</code> شکارچی • <code>/profile</code> مدارک\n\n"
                 "⏰ <b>نکته مهم برای کویرتایر و سامانه تجارت:</b> هنگام استفاده از بخش دولتی این دو سایت، حتماً فیلترشکن دستگاه/سرور خاموش باشد."
             )
-            kb = {"inline_keyboard": [[{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}]]}
+            kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
+                        {"text": "💰 قیمت روز تایر آزاد", "callback_data": "menu_market_price"},
+                    ],
+                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                ]
+            }
             await self._safe_edit(chat_id, message_id, guide_text, reply_markup=kb)
 
     async def handle_text_message(self, message: Dict[str, Any]):
         chat_id = message.get("chat", {}).get("id")
         text = persian_to_english_digits(message.get("text", "").strip())
+        username = message.get("from", {}).get("username", "")
 
         if text.startswith("/"):
-            if text == "/start":
-                await self.handle_start(chat_id, message.get("from", {}).get("username", ""))
+            parts = text.split(maxsplit=1)
+            cmd = parts[0].split("@")[0].lower()
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if cmd in ("/start", "/menu"):
+                await self.handle_start(chat_id, username)
+            elif cmd == "/price":
+                sz = normalize_tire_size(arg) if arg else None
+                if sz:
+                    await set_state(chat_id, "IDLE")
+                    await self._send_market_price_report(chat_id, sz)
+                else:
+                    await self._route_callback(chat_id, None, "menu_market_price")
+            elif cmd == "/stock":
+                await self._route_callback(chat_id, None, "live_check_stock")
+            elif cmd == "/sniper":
+                await self._route_callback(chat_id, None, "menu_sniper")
+            elif cmd == "/profile":
+                await self._route_callback(chat_id, None, "menu_profile")
+            elif cmd == "/help":
+                await self._route_callback(chat_id, None, "menu_guide")
+            else:
+                await self.handle_start(chat_id, username)
             return
 
         user = await get_user(chat_id)
         if not user:
-            user = await upsert_user(chat_id)
+            user = await upsert_user(chat_id, username=username)
 
         state = user.get("state", "IDLE")
 
@@ -759,36 +860,38 @@ class BaleBotHandlers:
             cleaned = re.sub(r"\D", "", text)
             if len(cleaned) == 10:
                 await upsert_user(chat_id, national_id=cleaned, state="IDLE")
-                await self.bot.send_message(chat_id, f"✅ <b>کد ملی ثبت شد:</b> <code>{cleaned}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+                await self.bot.send_message(chat_id, f"✅ <b>کد ملی ثبت شد:</b> <code>{cleaned}</code>", reply_markup=self._profile_saved_keyboard())
             else:
-                await self.bot.send_message(chat_id, "❌ کد ملی باید ۱۰ رقم باشد. دوباره بفرستید:")
+                cancel_kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
+                await self.bot.send_message(chat_id, "❌ کد ملی باید ۱۰ رقم باشد. دوباره بفرستید:", reply_markup=cancel_kb)
 
         elif state == "AWAIT_MOBILE":
             cleaned = re.sub(r"\D", "", text)
             if len(cleaned) == 11 and cleaned.startswith("09"):
                 await upsert_user(chat_id, mobile=cleaned, state="IDLE")
-                await self.bot.send_message(chat_id, f"✅ <b>موبایل ذخیره شد:</b> <code>{cleaned}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+                await self.bot.send_message(chat_id, f"✅ <b>موبایل ذخیره شد:</b> <code>{cleaned}</code>", reply_markup=self._profile_saved_keyboard())
             else:
-                await self.bot.send_message(chat_id, "❌ شماره موبایل نامعتبر است (مثال: <code>09121234567</code>):")
+                cancel_kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
+                await self.bot.send_message(chat_id, "❌ شماره موبایل نامعتبر است (مثال: <code>09121234567</code>):", reply_markup=cancel_kb)
 
         elif state == "AWAIT_PLATE":
             await upsert_user(chat_id, car_plate=message.get("text", "").strip(), state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>پلاک ثبت شد:</b> <code>{escape_html(message.get('text', '').strip())}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+            await self.bot.send_message(chat_id, f"✅ <b>پلاک ثبت شد:</b> <code>{escape_html(message.get('text', '').strip())}</code>", reply_markup=self._profile_saved_keyboard())
 
         elif state == "AWAIT_VIN":
             vin_clean = text.strip().upper()
             await upsert_user(chat_id, car_vin=vin_clean, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>کد VIN ذخیره شد:</b> <code>{escape_html(vin_clean)}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+            await self.bot.send_message(chat_id, f"✅ <b>کد VIN ذخیره شد:</b> <code>{escape_html(vin_clean)}</code>", reply_markup=self._profile_saved_keyboard())
 
         elif state == "AWAIT_CHASSIS":
             val = text.strip().upper()
             await upsert_user(chat_id, chassis_no=val, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>شماره شاسی ذخیره شد:</b> <code>{escape_html(val)}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+            await self.bot.send_message(chat_id, f"✅ <b>شماره شاسی ذخیره شد:</b> <code>{escape_html(val)}</code>", reply_markup=self._profile_saved_keyboard())
 
         elif state == "AWAIT_GREEN":
             val = text.strip()
             await upsert_user(chat_id, green_sheet_no=val, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>برگ سبز ثبت شد:</b> <code>{escape_html(val)}</code>", reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+            await self.bot.send_message(chat_id, f"✅ <b>برگ سبز ثبت شد:</b> <code>{escape_html(val)}</code>", reply_markup=self._profile_saved_keyboard())
 
         elif state.startswith("AWAIT_REAL_OTP"):
             otp_portal = "barez" if "BAREZ" in state else ("kavir" if "KAVIR" in state else None)
@@ -798,7 +901,8 @@ class BaleBotHandlers:
                 await set_state(chat_id, "IDLE")
                 await self.bot.send_message(chat_id, verify_res.get("message", "✅ تایید شد"), reply_markup=self.get_main_keyboard(await get_user(chat_id)))
             else:
-                await self.bot.send_message(chat_id, f"{verify_res.get('message')}\nکد صحیح را دوباره بفرستید یا /start بزنید:")
+                cancel_kb = {"inline_keyboard": [[{"text": "🏠 انصراف و منوی اصلی", "callback_data": "main_menu"}]]}
+                await self.bot.send_message(chat_id, f"{verify_res.get('message')}\nکد صحیح را دوباره بفرستید:", reply_markup=cancel_kb)
 
         elif state == "AWAIT_MARKET_SIZE":
             norm = normalize_tire_size(text)
@@ -806,7 +910,8 @@ class BaleBotHandlers:
                 await set_state(chat_id, "IDLE")
                 await self._send_market_price_report(chat_id, norm)
             else:
-                await self.bot.send_message(chat_id, "❌ فرمت سایز درست نیست! مثال: <code>185/65R14</code> یا <code>205/60/15</code>")
+                cancel_kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به لیست سایزها", "callback_data": "menu_market_price"}]]}
+                await self.bot.send_message(chat_id, "❌ فرمت سایز درست نیست! مثال: <code>185/65R14</code> یا <code>205/60/15</code>", reply_markup=cancel_kb)
 
         else:
             # هوشمندی: اگر کاربر بدون رفتن به منو مستقیم سایز لاستیک (مثلاً 185/65R14) بفرستد، همان لحظه قیمت روز را استعلام می‌گیرد!

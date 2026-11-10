@@ -1,8 +1,10 @@
 @echo off
 chcp 65001 > nul
-echo ========================================================
-echo   🚀 ربات ثبت‌نام فوق‌سریع لاستیک دولتی در پیام‌رسان بله
-echo ========================================================
+title مرکز کنترل یکپارچه ربات تایر بله (@tairbot)
 cd /d "%~dp0"
-python main.py
-pause
+if "%~1"=="" (
+    python -u bot_ctl.py
+) else (
+    python -u bot_ctl.py %*
+)
+if errorlevel 1 pause

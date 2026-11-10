@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from config import PORTALS
 from database import get_user, upsert_user, log_action
 from bale_api import BaleBotClient
+from captcha_solver import FastCaptchaSolver
 from telemetry import telemetry
 from tire_api.hypertire_client import HyperTireClient
 from tire_api.barez_client import BarezTireClient
@@ -57,6 +58,16 @@ class SniperEngine:
         if portal_name in self.factory_clients:
             return self.factory_clients[portal_name]
         return self.barez_client
+
+    async def fetch_clean_captcha(self, portal: str = "kavir") -> Dict[str, Any]:
+        """دریافت و شفاف‌سازی تصویر کپچای پورتال برای نمایش خوانا یا پردازش خودکار"""
+        if portal == "kavir":
+            raw_bytes, token = await self.kavir_client.get_captcha()
+            if raw_bytes:
+                clean_png = FastCaptchaSolver.get_clean_png_bytes(raw_bytes)
+                guess = FastCaptchaSolver.solve_simple_digits(raw_bytes)
+                return {"ok": True, "image_bytes": clean_png, "token": token, "guess": guess}
+        return {"ok": False, "image_bytes": None, "token": None, "guess": None}
 
     async def scan_all_portals_live(
         self, target_portal: str = "all", filter_size_key: Optional[str] = None

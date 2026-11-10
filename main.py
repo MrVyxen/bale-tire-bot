@@ -21,8 +21,9 @@ async def health_check_handler(request):
     این اندپوینت باعث می‌شود رندر سرویس را فعال و آنلاین (Healthy) شناسایی کند.
     """
     return web.Response(
-        text="🚀 Bale Tire Sniper Bot is LIVE and running on Render!",
-        content_type="text/plain; charset=utf-8",
+        text="🚀 Bale Tire Sniper Bot is LIVE and running!",
+        content_type="text/plain",
+        charset="utf-8",
         status=200
     )
 
@@ -39,6 +40,18 @@ async def start_web_server():
     logger.info(f"Render Web Health Server listening on 0.0.0.0:{port}")
     return runner
 
+_chat_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _dispatch_safely(chat_id: int, coro_fn, payload):
+    lock = _chat_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        try:
+            await coro_fn(payload)
+        except Exception:
+            logger.exception(f"Unhandled error in update handler for chat_id={chat_id}")
+
+
 async def bot_polling_worker(bot_client: BaleBotClient, handlers: BaleBotHandlers):
     offset = 0
     logger.info("Polling loop started. Listening for updates...")
@@ -52,11 +65,13 @@ async def bot_polling_worker(bot_client: BaleBotClient, handlers: BaleBotHandler
                     if "message" in update:
                         msg = update["message"]
                         if "text" in msg:
-                            asyncio.create_task(handlers.handle_text_message(msg))
+                            cid = msg.get("chat", {}).get("id", 0)
+                            asyncio.create_task(_dispatch_safely(cid, handlers.handle_text_message, msg))
 
                     elif "callback_query" in update:
                         cq = update["callback_query"]
-                        asyncio.create_task(handlers.handle_callback_query(cq))
+                        cid = cq.get("message", {}).get("chat", {}).get("id", 0)
+                        asyncio.create_task(_dispatch_safely(cid, handlers.handle_callback_query, cq))
             else:
                 logger.warning(f"Bale getUpdates response: {updates}")
                 await asyncio.sleep(3)

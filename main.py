@@ -180,8 +180,19 @@ async def active_analytics_worker(bot_client: BaleBotClient, sniper_engine: Snip
         await asyncio.sleep(180.0)
 
 
+def _handle_loop_exception(loop, context):
+    msg = context.get("message")
+    exception = context.get("exception")
+    if exception and isinstance(exception, (asyncio.CancelledError, OSError)):
+        logger.debug(f"Handled benign network/loop exception: {exception}")
+        return
+    logger.warning(f"Async loop warning: {msg} | {exception}")
+
+
 async def run_bot():
     global _sniper_engine_ref
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_handle_loop_exception)
     logger.info("Initializing Tire Sniper Bot for Bale...")
 
     # ۱. راه‌اندازی فوری وب‌سرور و داشبورد آنالیز (/dashboard و /status)

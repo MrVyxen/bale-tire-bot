@@ -195,12 +195,12 @@ class MarketPriceClient:
         offers: List[Dict[str, Any]] = []
         seen_ids = set()
 
-        queries = (f"لاستیک {norm_size}", f"لاستیک {w}/{a}/{r}", f"تایر {w} {a} {r}")
+        queries = (norm_size, f"{w}/{a}R{r}", f"لاستیک {w}/{a}")
 
         async def _query(q: str):
             try:
                 async with session.get(
-                    "https://api.digikala.com/v1/search/",
+                    "https://api.digikala.com/v1/categories/tire/search/",
                     params={"q": q, "page": 1},
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:

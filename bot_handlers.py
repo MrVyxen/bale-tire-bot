@@ -27,7 +27,7 @@ class BaleBotHandlers:
 
     @staticmethod
     def calculate_profile_completion(user: Dict[str, Any]) -> tuple[int, str]:
-        fields = ["national_id", "mobile", "car_plate", "car_vin", "chassis_no", "green_sheet_no"]
+        fields = ["national_id", "mobile"]
         filled = sum(1 for f in fields if user.get(f))
         pct = int((filled / len(fields)) * 100)
         total_blocks = 10
@@ -70,7 +70,7 @@ class BaleBotHandlers:
                     {"text": f"🛞 سایز: {cur_size}", "callback_data": "menu_size"},
                 ],
                 [
-                    {"text": f"👤 مدارک و خودرو ({prof_badge})", "callback_data": "menu_profile"},
+                    {"text": f"👤 اطلاعات مالک ({prof_badge})", "callback_data": "menu_profile"},
                     {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
                 ],
                 [
@@ -94,7 +94,7 @@ class BaleBotHandlers:
             f"⚡ <b>شکارچی دولتی:</b> {sniper_st}\n"
             f"🏭 <b>شرکت هدف:</b> <code>{escape_html(portal_name)}</code>\n"
             f"🛞 <b>سایز هدف:</b> <code>{escape_html(size_label)}</code> (<b>{user.get('tire_count', 2)} حلقه</b>)\n"
-            f"📋 <b>تکمیل مدارک:</b> <code>{progress_bar}</code>\n\n"
+            f"👤 <b>اطلاعات مالک:</b> <code>{progress_bar}</code>\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💡 <i>نکته هوشمند: می‌توانید هر سایز دلخواهی مثل <code>185/65R14</code> را همین‌جا تایپ کنید تا قیمت لحظه‌ای بازار آزاد را بگیرید.</i>"
         )
@@ -117,11 +117,11 @@ class BaleBotHandlers:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "✏️ تکمیل سایر مدارک", "callback_data": "menu_profile"},
-                    {"text": "📋 شناسنامه من", "callback_data": "view_profile"},
+                    {"text": "👤 اطلاعات مالک", "callback_data": "menu_profile"},
+                    {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
                 ],
                 [
-                    {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
+                    {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
                     {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
                 ],
             ]
@@ -322,54 +322,38 @@ class BaleBotHandlers:
                 await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=self.get_main_keyboard(user))
 
         elif data == "menu_profile":
-            _, progress_bar = self.calculate_profile_completion(user)
+            pct, progress_bar = self.calculate_profile_completion(user)
             n_icon = "✅" if user.get("national_id") else "⚠️"
             m_icon = "✅" if user.get("mobile") else "⚠️"
-            p_icon = "✅" if user.get("car_plate") else "⚠️"
-            v_icon = "✅" if user.get("car_vin") else "⚠️"
-            c_icon = "✅" if user.get("chassis_no") else "⚠️"
-            g_icon = "✅" if user.get("green_sheet_no") else "⚠️"
 
             text = (
-                "👤 <b>مدارک مالک و اطلاعات خودرو</b>\n"
+                "👤 <b>اطلاعات مالک خودرو</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📊 <b>وضعیت تکمیل:</b> <code>{progress_bar}</code>\n\n"
-                f"▫️ <b>کد ملی:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code> {n_icon}\n"
-                f"▫️ <b>موبایل:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code> {m_icon}\n"
-                f"▫️ <b>پلاک خودرو:</b> <code>{user.get('car_plate') or 'ثبت نشده'}</code> {p_icon}\n"
-                f"▫️ <b>کد VIN:</b> <code>{user.get('car_vin') or 'ثبت نشده'}</code> {v_icon}\n"
-                f"▫️ <b>شماره شاسی:</b> <code>{user.get('chassis_no') or 'ثبت نشده'}</code> {c_icon}\n"
-                f"▫️ <b>سریال برگ سبز:</b> <code>{user.get('green_sheet_no') or 'ثبت نشده'}</code> {g_icon}\n\n"
+                f"▫️ <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code> {n_icon}\n"
+                f"▫️ <b>موبایل به نام مالک:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code> {m_icon}\n\n"
+                "💡 <i>فقط همین ۲ مورد برای ورود پیامکی و شکارچی لازم است؛ بقیه مشخصات خودرو موقع خرید نهایی در خود سایت وارد می‌شود.</i>\n\n"
                 "👇 برای ثبت یا ویرایش هر مورد کلیک کنید:"
             )
-            kb = {
-                "inline_keyboard": [
-                    [
-                        {"text": f"کد ملی {n_icon}", "callback_data": "edit_national_id"},
-                        {"text": f"موبایل {m_icon}", "callback_data": "edit_mobile"},
-                    ],
-                    [
-                        {"text": f"شماره پلاک {p_icon}", "callback_data": "edit_plate"},
-                        {"text": f"کد VIN {v_icon}", "callback_data": "edit_vin"},
-                    ],
-                    [
-                        {"text": f"شماره شاسی {c_icon}", "callback_data": "edit_chassis"},
-                        {"text": f"برگ سبز {g_icon}", "callback_data": "edit_green"},
-                    ],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
-                ]
-            }
-            await self._safe_edit(chat_id, message_id, text, reply_markup=kb)
+            rows = [
+                [
+                    {"text": f"کد ملی {n_icon}", "callback_data": "edit_national_id"},
+                    {"text": f"موبایل {m_icon}", "callback_data": "edit_mobile"},
+                ],
+            ]
+            if pct == 100:
+                rows.append([
+                    {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
+                    {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
+                ])
+            rows.append([{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}])
+            await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
         elif data.startswith("edit_"):
             field = data.replace("edit_", "")
             prompts = {
                 "national_id": ("AWAIT_NAT_ID", "👤 <b>کد ملی ۱۰ رقمی مالک را ارسال کنید:</b>\n<i>مثال: 0012345678</i>"),
                 "mobile": ("AWAIT_MOBILE", "📱 <b>شماره موبایل ۱۱ رقمی به نام مالک را ارسال کنید:</b>\n<i>مثال: 09123456789</i>"),
-                "plate": ("AWAIT_PLATE", "🚘 <b>شماره پلاک کامل خودرو را ارسال کنید:</b>\n<i>مثال: ۱۲ ب ۳۴۵ ایران ۲۲</i>"),
-                "vin": ("AWAIT_VIN", "🔑 <b>کد ۱۷ رقمی VIN روی کارت ماشین را ارسال کنید:</b>\n<i>مثال: IRNC1234567890123</i>"),
-                "chassis": ("AWAIT_CHASSIS", "⚙️ <b>شماره شاسی خودرو را ارسال کنید:</b>"),
-                "green": ("AWAIT_GREEN", "📄 <b>شماره سریال قرمز رنگ برگ سبز را ارسال کنید:</b>"),
             }
             if field in prompts:
                 st, msg = prompts[field]
@@ -634,7 +618,7 @@ class BaleBotHandlers:
                     await self._safe_edit(
                         chat_id,
                         message_id,
-                        "⚠️ <b>اطلاعات مدارک ناقص است!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو»، حداقل <b>کد ملی</b> و <b>شماره موبایل</b> را ثبت کنید.",
+                        "⚠️ <b>اطلاعات مالک ناقص است!</b>\nلطفاً ابتدا در بخش «👤 اطلاعات مالک»، <b>کد ملی</b> و <b>شماره موبایل</b> را ثبت کنید.",
                         reply_markup=miss_kb,
                     )
                     return
@@ -716,7 +700,7 @@ class BaleBotHandlers:
                 await self._safe_edit(
                     chat_id,
                     message_id,
-                    "⚠️ <b>شماره موبایل یافت نشد!</b>\nلطفاً ابتدا در بخش «👤 مدارک و خودرو» شماره همراه مالک را ثبت کنید.",
+                    "⚠️ <b>شماره موبایل یافت نشد!</b>\nلطفاً ابتدا در بخش «👤 اطلاعات مالک» شماره همراه مالک را ثبت کنید.",
                     reply_markup=miss_kb,
                 )
                 return
@@ -778,12 +762,8 @@ class BaleBotHandlers:
             summary = (
                 "📋 <b>شناسنامه و تنظیمات شما</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"👤 <b>کد ملی:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
-                f"📱 <b>موبایل:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code>\n"
-                f"🚘 <b>پلاک:</b> <code>{user.get('car_plate') or 'ثبت نشده'}</code>\n"
-                f"🔑 <b>کد VIN:</b> <code>{user.get('car_vin') or 'ثبت نشده'}</code>\n"
-                f"⚙️ <b>شاسی:</b> <code>{user.get('chassis_no') or 'ثبت نشده'}</code>\n"
-                f"📄 <b>برگ سبز:</b> <code>{user.get('green_sheet_no') or 'ثبت نشده'}</code>\n\n"
+                f"👤 <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
+                f"📱 <b>موبایل مالک:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code>\n\n"
                 f"🏭 <b>شرکت هدف:</b> <code>{escape_html(p_name)}</code>\n"
                 f"🛞 <b>سایز هدف:</b> <code>{escape_html(s_name)}</code> (<b>{user.get('tire_count', 2)} حلقه</b>)\n"
                 f"⚡ <b>شکارچی:</b> {sniper_st}\n"
@@ -791,7 +771,7 @@ class BaleBotHandlers:
             )
             kb = {
                 "inline_keyboard": [
-                    [{"text": "✏️ ویرایش مدارک", "callback_data": "menu_profile"}],
+                    [{"text": "✏️ ویرایش اطلاعات مالک", "callback_data": "menu_profile"}],
                     [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
@@ -801,12 +781,12 @@ class BaleBotHandlers:
             guide_text = (
                 "📖 <b>راهنمای استفاده سریع از ربات</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "1️⃣ <b>مدارک:</b> از بخش «👤 مدارک و خودرو» کد ملی، موبایل (به نام مالک) و اطلاعات کارت خودرو را ثبت کنید.\n"
+                "1️⃣ <b>اطلاعات مالک:</b> از بخش «👤 اطلاعات مالک» فقط کد ملی و شماره موبایل به نام مالک را ثبت کنید (سایر مشخصات خودرو هنگام پرداخت در خود سایت وارد می‌شود).\n"
                 "2️⃣ <b>موجودی دولتی:</b> دکمه «🛞 سایزها» فقط بر اساس موجودی لحظه‌ای سایت‌ها به شما نمایش می‌دهد چه سایزی باز است.\n"
                 "3️⃣ <b>شکارچی خودکار:</b> روی «همه شرکت‌ها» بگذارید و روشن کنید تا تمام سایت‌های دولتی هم‌زمان رصد شوند.\n"
                 "4️⃣ <b>قیمت روز تایر آزاد:</b> با زدن «💰 قیمت روز تایر آزاد» یا تایپ مستقیم سایز (مثلاً <code>185/65R14</code>) نرخ همان ساعت را از فروشگاه‌های کشور بگیرید.\n\n"
                 "⌨️ <b>دستورات سریع متنی:</b>\n"
-                "<code>/start</code> منوی اصلی • <code>/stock</code> موجودی دولتی • <code>/price</code> قیمت آزاد • <code>/sniper</code> شکارچی • <code>/profile</code> مدارک\n\n"
+                "<code>/start</code> منوی اصلی • <code>/stock</code> موجودی دولتی • <code>/price</code> قیمت آزاد • <code>/sniper</code> شکارچی • <code>/profile</code> اطلاعات مالک\n\n"
                 "⏰ <b>نکته مهم برای کویرتایر و سامانه تجارت:</b> هنگام استفاده از بخش دولتی این دو سایت، حتماً فیلترشکن دستگاه/سرور خاموش باشد."
             )
             kb = {
@@ -873,25 +853,6 @@ class BaleBotHandlers:
             else:
                 cancel_kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
                 await self.bot.send_message(chat_id, "❌ شماره موبایل نامعتبر است (مثال: <code>09121234567</code>):", reply_markup=cancel_kb)
-
-        elif state == "AWAIT_PLATE":
-            await upsert_user(chat_id, car_plate=message.get("text", "").strip(), state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>پلاک ثبت شد:</b> <code>{escape_html(message.get('text', '').strip())}</code>", reply_markup=self._profile_saved_keyboard())
-
-        elif state == "AWAIT_VIN":
-            vin_clean = text.strip().upper()
-            await upsert_user(chat_id, car_vin=vin_clean, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>کد VIN ذخیره شد:</b> <code>{escape_html(vin_clean)}</code>", reply_markup=self._profile_saved_keyboard())
-
-        elif state == "AWAIT_CHASSIS":
-            val = text.strip().upper()
-            await upsert_user(chat_id, chassis_no=val, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>شماره شاسی ذخیره شد:</b> <code>{escape_html(val)}</code>", reply_markup=self._profile_saved_keyboard())
-
-        elif state == "AWAIT_GREEN":
-            val = text.strip()
-            await upsert_user(chat_id, green_sheet_no=val, state="IDLE")
-            await self.bot.send_message(chat_id, f"✅ <b>برگ سبز ثبت شد:</b> <code>{escape_html(val)}</code>", reply_markup=self._profile_saved_keyboard())
 
         elif state.startswith("AWAIT_REAL_OTP"):
             otp_portal = "barez" if "BAREZ" in state else ("kavir" if "KAVIR" in state else None)

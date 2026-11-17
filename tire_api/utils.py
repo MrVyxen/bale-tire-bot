@@ -345,3 +345,27 @@ def detect_tire_brand(title: str) -> Tuple[str, str]:
                 return label, "IMP"
 
     return "سایر برندها", "IMP"
+
+
+def is_valid_iran_national_id(code: str) -> bool:
+    """اعتبارسنجی ریاضی کد ملی ۱۰ رقمی ایران (رقم کنترل واقعی + رد ارقام تکراری)"""
+    cleaned = re.sub(r"\D", "", persian_to_english_digits(code or ""))
+    if len(cleaned) != 10 or len(set(cleaned)) == 1:
+        return False
+    check = int(cleaned[9])
+    total = sum(int(cleaned[i]) * (10 - i) for i in range(9))
+    rem = total % 11
+    return (rem < 2 and check == rem) or (rem >= 2 and check == 11 - rem)
+
+
+def detect_car_from_text(text: str, car_catalog: dict) -> Optional[str]:
+    """تشخیص هوشمند کلید خودرو از روی متن تایپ‌شده کاربر (مثل 'پژو ۲۰۶'، 'پراید'، 'دنا' و...)"""
+    t = clean_search_text(text).lower()
+    if not t or len(t) > 60:
+        return None
+    for car_key, info in car_catalog.items():
+        for kw in info.get("keywords", ()):
+            kw_norm = clean_search_text(kw).lower()
+            if kw_norm and kw_norm in t:
+                return car_key
+    return None

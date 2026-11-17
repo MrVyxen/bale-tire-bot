@@ -151,6 +151,29 @@ async def record_market_price_snapshot(
             await db.commit()
 
 
+async def get_previous_market_snapshot(tire_size: str) -> Optional[Dict[str, Any]]:
+    """دریافت آخرین قیمت ثبت‌شده قبلی برای نمایش روند تغییرات قیمت بازار"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT ir_min_unit, ir_median_unit, imp_min_unit, tehran_time, created_at
+                FROM market_price_history
+                WHERE tire_size = ?
+                ORDER BY id DESC
+                LIMIT 2
+                """,
+                (tire_size,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                if len(rows) >= 2:
+                    return dict(rows[1])
+    except Exception:
+        pass
+    return None
+
+
 async def get_analytics_summary() -> Dict[str, Any]:
     """خلاصه دقیق آماری کاربران، اکشن‌ها و سوابق قیمت از SQLite"""
     try:

@@ -1,16 +1,19 @@
+import asyncio
 import html
 import re
 import logging
 from typing import Dict, Any, Optional, List
-from database import get_user, upsert_user, set_state, log_action
+from database import get_user, upsert_user, set_state, log_action, get_previous_market_snapshot
 from bale_api import BaleBotClient
-from config import PORTALS, CAR_HINT_FOR_SIZE, MARKET_TIRE_SIZES
+from config import PORTALS, CAR_HINT_FOR_SIZE, MARKET_TIRE_SIZES, CAR_TIRE_CATALOG
 from tire_api.sniper_engine import SniperEngine
 from tire_api.utils import (
+    detect_car_from_text,
     escape_html,
     format_short_million,
     format_toman,
     get_tehran_now,
+    is_valid_iran_national_id,
     key_to_size,
     normalize_tire_size,
     persian_to_english_digits,
@@ -46,9 +49,9 @@ class BaleBotHandlers:
         user = user or {}
         is_sniper_on = bool(user.get("sniper_enabled", 0))
         sniper_btn = (
-            "🟢 شکارچی خودکار: روشن (آماده شلیک)"
+            "🟢 شکارچی خودکار: فعال و بیدار 🛰"
             if is_sniper_on
-            else "🔴 شکارچی خودکار: خاموش (کلیک برای روشن)"
+            else "⚡ فعال‌سازی شکارچی خودکار تایر دولتی"
         )
 
         pct, _ = cls.calculate_profile_completion(user)
@@ -63,40 +66,47 @@ class BaleBotHandlers:
                 [{"text": sniper_btn, "callback_data": "menu_sniper"}],
                 [
                     {"text": "📦 موجودی انبار دولتی", "callback_data": "live_check_stock"},
-                    {"text": "💰 قیمت روز تایر آزاد", "callback_data": "menu_market_price"},
+                    {"text": "💰 قیمت روز بازار آزاد", "callback_data": "menu_market_price"},
                 ],
                 [
-                    {"text": f"🏭 شرکت‌ها ({p_short})", "callback_data": "menu_portal"},
-                    {"text": f"🛞 سایز: {cur_size}", "callback_data": "menu_size"},
+                    {"text": "🚘 انتخاب با نام خودرو", "callback_data": "menu_car_picker"},
+                    {"text": "⚖️ مقایسه دولتی و آزاد", "callback_data": "compare_gov_market"},
+                ],
+                [
+                    {"text": f"🏭 کارخانه‌ها ({p_short})", "callback_data": "menu_portal"},
+                    {"text": f"🛞 سایز ({cur_size})", "callback_data": "menu_size"},
                 ],
                 [
                     {"text": f"👤 اطلاعات مالک ({prof_badge})", "callback_data": "menu_profile"},
-                    {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
+                    {"text": "🔐 ورود پیامکی کارخانه", "callback_data": "auth_real_otp"},
                 ],
                 [
-                    {"text": "📋 شناسنامه من", "callback_data": "view_profile"},
-                    {"text": "📖 راهنما و ساعات", "callback_data": "menu_guide"},
+                    {"text": "📋 وضعیت و پروفایل من", "callback_data": "view_profile"},
+                    {"text": "📖 راهنمای جامع خرید", "callback_data": "menu_guide"},
                 ],
             ]
         }
 
     def _build_dashboard_text(self, user: Dict[str, Any], header: str) -> str:
-        _, progress_bar = self.calculate_profile_completion(user)
-        sniper_st = "🟢 <b>فعال و در حال رصد لحظه‌ای</b>" if user.get("sniper_enabled", 0) else "🔴 <b>خاموش</b>"
+        pct, progress_bar = self.calculate_profile_completion(user)
+        sniper_st = "🟢 <b>روشن — در حال رصد لحظه‌ای سایت‌ها</b>" if user.get("sniper_enabled", 0) else "🔴 <b>خاموش (آماده فعال‌سازی)</b>"
         portal_name = PORTALS.get(user.get("target_portal", "all"), PORTALS["all"]).get("title", "همه کارخانه‌ها")
         size_label = self._format_size_label(user.get("target_tire_size", "185_65_14"))
         now_fa = get_tehran_now()["compact_fa"]
+        ready_hint = "✅ <i>پروفایل شما تکمیل و آماده شکار است!</i>" if pct == 100 else "🔔 <i>برای فعال‌کردن شکارچی، فقط کد ملی و موبایل را در «اطلاعات مالک» ثبت کنید.</i>"
 
         return (
-            f"🏎 <b>{header}</b>\n"
-            f"🕒 <i>{now_fa}</i>\n"
+            f"✨ <b>{header}</b> ✨\n"
+            f"🗓 <i>{now_fa}</i>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"⚡ <b>شکارچی دولتی:</b> {sniper_st}\n"
-            f"🏭 <b>شرکت هدف:</b> <code>{escape_html(portal_name)}</code>\n"
-            f"🛞 <b>سایز هدف:</b> <code>{escape_html(size_label)}</code> (<b>{user.get('tire_count', 2)} حلقه</b>)\n"
+            f"🛰 <b>شکارچی دولتی:</b> {sniper_st}\n"
+            f"🏭 <b>کارخانه هدف:</b> <code>{escape_html(portal_name)}</code>\n"
+            f"🛞 <b>سایز انتخابی:</b> <code>{escape_html(size_label)}</code>\n"
+            f"📦 <b>تعداد درخواستی:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n"
             f"👤 <b>اطلاعات مالک:</b> <code>{progress_bar}</code>\n\n"
+            f"{ready_hint}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 <i>نکته هوشمند: می‌توانید هر سایز دلخواهی مثل <code>185/65R14</code> را همین‌جا تایپ کنید تا قیمت لحظه‌ای بازار آزاد را بگیرید.</i>"
+            "💡 <b>ترفند هوشمند:</b> هر زمان <b>نام خودرو</b> (مثل <code>پژو ۲۰۶</code> یا <code>دنا</code>) یا <b>سایز تایر</b> (مثل <code>185/65R14</code>) را مستقیم در چت بفرستید، ربات فوراً جواب می‌دهد!"
         )
 
     async def _safe_edit(self, chat_id: int, message_id: Optional[int], text: str, reply_markup: Optional[Dict[str, Any]] = None):
@@ -117,15 +127,138 @@ class BaleBotHandlers:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "👤 اطلاعات مالک", "callback_data": "menu_profile"},
+                    {"text": "👤 برگشت به اطلاعات مالک", "callback_data": "menu_profile"},
                     {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
                 ],
                 [
-                    {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
+                    {"text": "🔐 ورود پیامکی کارخانه", "callback_data": "auth_real_otp"},
                     {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
                 ],
             ]
         }
+
+    async def _send_car_recommendation(self, chat_id: int, car_key: str, edit_msg_id: Optional[int] = None):
+        car = CAR_TIRE_CATALOG.get(car_key)
+        if not car:
+            return
+        std_sz = car["standard"]
+        wide_sz = car["wide"]
+        std_key = size_to_key(std_sz)
+        wide_key = size_to_key(wide_sz)
+
+        text = (
+            f"🚘 <b>راهنمای سایز تایر مناسب {escape_html(car['name'])}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⭐ <b>سایز استاندارد کارخانه (فابریک):</b> <code>{std_sz}</code>\n"
+            "   └ <i>بهترین انتخاب برای مصرف سوخت، نرمی فرمان و دریافت سهمیه دولتی</i>\n\n"
+            f"🔥 <b>سایز جایگزین / پهن‌تر:</b> <code>{wide_sz}</code>\n"
+            "   └ <i>تعادل بیشتر در پیچ‌ها و نمای اسپرت‌تر (در صورت تناسب با رینگ خودرو)</i>\n\n"
+            "👇 با یک کلیک قیمت روز بازار آزاد را بگیرید یا برای شکارچی دولتی ثبتش کنید:"
+        )
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": f"💰 قیمت آزاد ({std_sz})", "callback_data": f"mkt_{std_key}"},
+                    {"text": f"🎯 شکارچی ({std_sz})", "callback_data": f"set_size_{std_key}"},
+                ],
+                [
+                    {"text": f"💰 قیمت آزاد ({wide_sz})", "callback_data": f"mkt_{wide_key}"},
+                    {"text": f"🎯 شکارچی ({wide_sz})", "callback_data": f"set_size_{wide_key}"},
+                ],
+                [
+                    {"text": f"⚖️ مقایسه دولتی و آزاد ({std_sz})", "callback_data": f"cmp_{std_key}"},
+                ],
+                [
+                    {"text": "🚘 انتخاب خودروی دیگر", "callback_data": "menu_car_picker"},
+                    {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                ],
+            ]
+        }
+        if edit_msg_id:
+            await self._safe_edit(chat_id, edit_msg_id, text, reply_markup=kb)
+        else:
+            await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+    async def _send_gov_vs_market_comparison(
+        self, chat_id: int, raw_size: str, tire_count: int = 2, edit_msg_id: Optional[int] = None
+    ):
+        norm = normalize_tire_size(raw_size) or key_to_size(raw_size)
+        sk = size_to_key(norm)
+        loading = (
+            f"⚖️ <b>در حال مقایسه زنده نرخ دولتی و بازار آزاد برای <code>{escape_html(norm)}</code>...</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⏳ <i>در حال استعلام هم‌زمان از انبار ۱۰ کارخانه دولتی و ۴ بازار آزاد کشور...</i>"
+        )
+        if edit_msg_id:
+            await self._safe_edit(chat_id, edit_msg_id, loading)
+        else:
+            await self.bot.send_message(chat_id=chat_id, text=loading)
+
+        scan, mkt = await asyncio.gather(
+            self.sniper.scan_all_portals_live("all"),
+            self.sniper.market_client.fetch_live_market_prices(norm),
+        )
+        now_fa = get_tehran_now()["compact_fa"]
+        ir_sum = mkt.get("ir_summary") if mkt.get("ok") else None
+        avail_bucket = scan.get("available_sizes", {}).get(sk)
+
+        lines: List[str] = [
+            f"⚖️ <b>مقایسه هوشمند قیمت دولتی و بازار آزاد</b>",
+            f"🛞 <b>سایز:</b> <code>{escape_html(self._format_size_label(norm))}</code>  •  🕒 <i>{now_fa}</i>",
+            "━━━━━━━━━━━━━━━━━━━━\n",
+        ]
+
+        if ir_sum:
+            mkt_min = ir_sum["min_unit"]
+            mkt_med = ir_sum["median_unit"]
+            lines.append("💰 <b>بازار آزاد ایران (ایرانی تاییدشده — همین ساعت):</b>")
+            lines.append(f"  ▫️ کف قیمت هر حلقه: <b>{format_toman(mkt_min)}</b> تومان")
+            lines.append(f"  ▫️ میانه بازار هر حلقه: <b>{format_toman(mkt_med)}</b> تومان")
+            lines.append(f"  ▫️ هزینه یک جفت (۲ حلقه): <b>{format_toman(mkt_min * 2)}</b> تا <b>{format_toman(mkt_med * 2)}</b> تومان\n")
+        else:
+            mkt_min = 0
+            mkt_med = 0
+            lines.append("💰 <b>بازار آزاد:</b> <i>در این لحظه پیشنهاد تاییدشده ایرانی یافت نشد.</i>\n")
+
+        if avail_bucket and avail_bucket.get("min_price_toman"):
+            gov_p = int(avail_bucket["min_price_toman"])
+            portals_txt = "، ".join(avail_bucket.get("portals", []))
+            lines.append(f"🏛 <b>انبار دولتی (🟢 هم‌اکنون موجود در {escape_html(portals_txt)}):</b>")
+            lines.append(f"  ▫️ شروع قیمت دولتی: <b>{format_toman(gov_p)}</b> تومان\n")
+            if mkt_med and gov_p < mkt_med:
+                save_1 = mkt_med - gov_p
+                lines.append("💎 <b>سود خالص شما با خرید دولتی همین الان:</b>")
+                lines.append(f"  ▫️ هر حلقه: <b>{format_toman(save_1)}</b> تومان صرفه‌جویی!")
+                lines.append(f"  ▫️ برای ۲ حلقه: <b>{format_toman(save_1 * 2)}</b> تومان صرفه‌جویی!")
+                lines.append(f"  ▫️ برای ۴ حلقه: <b>{format_toman(save_1 * 4)}</b> تومان صرفه‌جویی! 🎉")
+        else:
+            lines.append("🏛 <b>انبار دولتی:</b> 🔴 <i>این سایز در این دقیقه ناموجود است.</i>")
+            if mkt_med:
+                est_gov = int(mkt_med * 0.62)
+                est_save_pair = max(0, (mkt_med - est_gov) * 2)
+                lines.append(
+                    f"💡 <i>برآورد تقریبی: معمولاً خرید دولتی این سایز حدود <b>{format_toman(est_save_pair)}</b> تا <b>{format_toman(est_save_pair * 2)}</b> تومان (برای ۲ تا ۴ حلقه) ارزان‌تر از بازار آزاد تمام می‌شود!</i>"
+                )
+            lines.append("⚡ <i>با روشن کردن «شکارچی خودکار»، به محض شارژ دولتی اولین نفر خبردار می‌شوید.</i>")
+
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "📦 جزئیات خرید دولتی", "callback_data": "live_check_stock"},
+                    {"text": "💰 لیست کامل بازار آزاد", "callback_data": f"mkt_{sk}"},
+                ],
+                [
+                    {"text": "⚡ روشن‌کردن شکارچی", "callback_data": "menu_sniper"},
+                    {"text": "🚘 انتخاب خودروی دیگر", "callback_data": "menu_car_picker"},
+                ],
+                [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
+            ]
+        }
+        await log_action(chat_id, "COMPARE_GOV_MKT", "OK", f"size={norm} gov_avail={bool(avail_bucket)}", 0.0)
+        if edit_msg_id:
+            await self._safe_edit(chat_id, edit_msg_id, "\n".join(lines), reply_markup=kb)
+        else:
+            await self.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb)
 
     async def handle_start(self, chat_id: int, username: str = ""):
         user = await get_user(chat_id)
@@ -133,7 +266,7 @@ class BaleBotHandlers:
             user = await upsert_user(chat_id, username=username)
         await set_state(chat_id, "IDLE")
 
-        text = self._build_dashboard_text(user, "سامانه هوشمند تایر دولتی و قیمت روز")
+        text = self._build_dashboard_text(user, "دستیار هوشمند تایر دولتی و قیمت روز")
         await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=self.get_main_keyboard(user))
 
     async def _send_market_price_report(
@@ -141,9 +274,11 @@ class BaleBotHandlers:
     ):
         norm = normalize_tire_size(raw_size) or raw_size
         loading_txt = (
-            f"🔎 <b>در حال استعلام زنده قیمت روز تایر <code>{escape_html(norm)}</code>...</b>\n\n"
-            "⏳ اتصال هم‌زمان به فروشگاه‌های دیجی‌کالا، باسلام، ترب و هایپرتایر\n"
-            "<i>در حال تفکیک دقیق تک‌حلقه، جفت و حذف اقلام متفرقه...</i>"
+            f"🔎 <b>در حال استعلام زنده قیمت روز تایر <code>{escape_html(norm)}</code>...</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🌐 اتصال هم‌زمان به ۴ مرجع بزرگ کشور:\n"
+            "▫️ <b>دیجی‌کالا</b> • <b>ترب</b> • <b>باسلام</b> • <b>هایپرتایر</b>\n\n"
+            "⏳ <i>در حال تفکیک دقیق تک‌حلقه و جفت، و حذف آگهی‌های متفرقه...</i>"
         )
         if edit_msg_id:
             await self._safe_edit(chat_id, edit_msg_id, loading_txt)
@@ -155,13 +290,14 @@ class BaleBotHandlers:
         kb = {
             "inline_keyboard": [
                 [
-                    {"text": "🔄 به‌روزرسانی همین ساعت", "callback_data": f"mktrefresh_{size_key}"},
-                    {"text": "🔍 سایز دیگر", "callback_data": "menu_market_price"},
+                    {"text": "🔄 بروزرسانی همین لحظه", "callback_data": f"mktrefresh_{size_key}"},
+                    {"text": "⚖️ مقایسه با دولتی", "callback_data": f"cmp_{size_key}"},
                 ],
                 [
-                    {"text": "🎯 ثبت سایز برای شکارچی", "callback_data": f"set_size_{size_key}"},
-                    {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    {"text": "🎯 ثبت برای شکارچی", "callback_data": f"set_size_{size_key}"},
+                    {"text": "🔍 استعلام سایز دیگر", "callback_data": "menu_market_price"},
                 ],
+                [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
             ]
         }
 
@@ -174,12 +310,13 @@ class BaleBotHandlers:
                         {"text": "🔄 تلاش مجدد", "callback_data": f"mktrefresh_{size_key}"},
                         {"text": "🔍 انتخاب سایز دیگر", "callback_data": "menu_market_price"},
                     ],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
             fail_txt = (
-                f"⚠️ <b>نتیجه دقیقی برای سایز <code>{escape_html(norm)}</code> یافت نشد!</b>\n\n"
-                "لطفاً مطمئن شوید سایز را صحیح وارد کرده‌اید (مثلاً <code>185/65R14</code> یا <code>205/60R15</code>) و دوباره تلاش کنید."
+                f"⚠️ <b>نتیجه دقیقی برای سایز <code>{escape_html(norm)}</code> پیدا نشد!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "💡 لطفاً بررسی کنید سایز را درست وارد کرده باشید (مثل <code>185/65R14</code> یا <code>205/60R15</code>) و یک‌بار دیگر امتحان کنید."
             )
             if edit_msg_id:
                 await self._safe_edit(chat_id, edit_msg_id, fail_txt, reply_markup=fail_kb)
@@ -200,32 +337,47 @@ class BaleBotHandlers:
                 src_parts.append(f"{s_name} ({cnt})")
         src_summary_line = " | ".join(src_parts)
 
+        car_hint = CAR_HINT_FOR_SIZE.get(report["size"])
+        car_line = f"🚘 <b>مناسب خودروهای:</b> {escape_html(car_hint)}\n" if car_hint else ""
+
         lines: List[str] = [
-            f"💰 <b>قیمت روز لاستیک آزاد • سایز <code>{escape_html(report['size'])}</code></b>",
-            f"🕒 <b>زمان دقیق:</b> {ts['full_fa']}",
-            f"📡 <b>منابع بررسی‌شده:</b> {src_summary_line}",
-            "━━━━━━━━━━━━━━━━━━━━\n",
+            f"💰 <b>قیمت زنده بازار آزاد • سایز <code>{escape_html(report['size'])}</code></b>",
+            f"🕒 <b>ساعت استعلام:</b> {ts['full_fa']}",
+            f"📡 <b>فروشگاه‌های بررسی‌شده:</b> {src_summary_line}",
+            car_line + "━━━━━━━━━━━━━━━━━━━━\n",
         ]
 
         ir_sum = report.get("ir_summary")
         if ir_sum:
+            trend_line = ""
+            prev_snap = await get_previous_market_snapshot(report["size"])
+            if prev_snap and prev_snap.get("ir_median_unit"):
+                diff = ir_sum["median_unit"] - int(prev_snap["ir_median_unit"])
+                if diff <= -50_000:
+                    trend_line = f"  📉 <i>روند بازار: <b>{format_toman(abs(diff))}</b> تومان ارزان‌تر نسبت به استعلام قبلی</i>\n"
+                elif diff >= 50_000:
+                    trend_line = f"  📈 <i>روند بازار: <b>{format_toman(diff)}</b> تومان گران‌تر نسبت به استعلام قبلی</i>\n"
+                else:
+                    trend_line = "  ➖ <i>روند بازار: قیمت ثابت نسبت به استعلام قبلی</i>\n"
+
             lines.append("🇮🇷 <b>بازه قیمت لاستیک ایرانی (تاییدشده):</b>")
             lines.append(
-                f"▫️ هر حلقه: <b>{format_toman(ir_sum['min_unit'])}</b> تا <b>{format_toman(ir_sum['max_unit'])}</b> تومان "
-                f"(میانه: <b>{format_toman(ir_sum['median_unit'])}</b>)"
+                f"  ▫️ هر حلقه: <b>{format_toman(ir_sum['min_unit'])}</b> تا <b>{format_toman(ir_sum['max_unit'])}</b> تومان\n"
+                f"  ▫️ قیمت میانه بازار: <b>{format_toman(ir_sum['median_unit'])}</b> تومان"
             )
             lines.append(
-                f"▫️ یک جفت (۲ حلقه): <b>{format_toman(ir_sum['min_pair'])}</b> تا <b>{format_toman(ir_sum['max_pair'])}</b> تومان\n"
+                f"  ▫️ هر جفت (۲ حلقه): <b>{format_toman(ir_sum['min_pair'])}</b> تا <b>{format_toman(ir_sum['max_pair'])}</b> تومان\n"
+                + trend_line
             )
 
         imp_sum = report.get("imp_summary")
         if imp_sum:
-            lines.append("🌍 <b>بازه قیمت لاستیک خارجی/وارداتی (تاییدشده):</b>")
+            lines.append("🌍 <b>بازه قیمت لاستیک خارجی / وارداتی:</b>")
             lines.append(
-                f"▫️ هر حلقه: <b>{format_toman(imp_sum['min_unit'])}</b> تا <b>{format_toman(imp_sum['max_unit'])}</b> تومان"
+                f"  ▫️ هر حلقه: <b>{format_toman(imp_sum['min_unit'])}</b> تا <b>{format_toman(imp_sum['max_unit'])}</b> تومان"
             )
             lines.append(
-                f"▫️ یک جفت (۲ حلقه): <b>{format_toman(imp_sum['min_pair'])}</b> تا <b>{format_toman(imp_sum['max_pair'])}</b> تومان\n"
+                f"  ▫️ هر جفت (۲ حلقه): <b>{format_toman(imp_sum['min_pair'])}</b> تا <b>{format_toman(imp_sum['max_pair'])}</b> تومان\n"
             )
 
         def _fmt_offer(idx: int, o: Dict[str, Any]) -> str:
@@ -236,11 +388,11 @@ class BaleBotHandlers:
             pk = o.get("pack_count")
             unit_p = format_toman(o["unit_price_toman"])
             raw_p = format_toman(o["price_toman"])
-            pack_note = f"حلقه <b>{unit_p}</b> ت (فروش جفتی: {raw_p})" if pk == 2 else (
-                f"حلقه <b>{unit_p}</b> ت (بسته ۴تایی: {raw_p})" if pk == 4 else f"<b>{unit_p}</b> تومان (تک)"
+            pack_note = f"حلقه‌ای <b>{unit_p}</b> ت (فروش جفتی: {raw_p})" if pk == 2 else (
+                f"حلقه‌ای <b>{unit_p}</b> ت (بسته ۴تایی: {raw_p})" if pk == 4 else f"<b>{unit_p}</b> تومان (تک‌حلقه)"
             )
             safe_url = html.escape(str(o.get("url") or ""), quote=True)
-            return f"{idx}. <b>{brand}{yr}</b> — {pack_note}\n   🏬 {src} | {shop} — <a href=\"{safe_url}\">مشاهده آگهی</a>"
+            return f"  {idx}. <b>{brand}{yr}</b> — {pack_note}\n     🏬 {src} | {shop} — <a href=\"{safe_url}\">مشاهده آگهی ↗️</a>"
 
         ir_offers = report.get("ir_offers", [])
         if ir_offers:
@@ -251,23 +403,23 @@ class BaleBotHandlers:
 
         imp_offers = report.get("imp_offers", [])
         if imp_offers:
-            lines.append("✈️ <b>گزینه‌های خارجی موجود در همین لحظه:</b>")
+            lines.append("✈️ <b>گزینه‌های خارجی موجود همین لحظه:</b>")
             for i, off in enumerate(imp_offers[:3], 1):
                 lines.append(_fmt_offer(i, off))
             lines.append("")
 
         unspec = report.get("unspecified_offers", [])
         if unspec and (not ir_offers or unspec[0]["price_toman"] <= ir_offers[0]["unit_price_toman"] * 1.15):
-            lines.append("⚠️ <i>فروشگاه بدون ذکر تک/جفت در عنوان (قبل از خرید تعداد را در لینک چک کنید):</i>")
+            lines.append("⚠️ <i>فروشگاه‌هایی که تعداد حلقه را در عنوان ننوشته‌اند (حتماً در لینک بررسی کنید):</i>")
             for off in unspec[:2]:
                 safe_u = html.escape(str(off.get("url") or ""), quote=True)
                 lines.append(
-                    f"▫️ <b>{escape_html(off['brand'])}</b> — قیمت درج‌شده: <b>{format_toman(off['price_toman'])}</b> ت | "
-                    f"{escape_html(off['shop_name'][:20])} (<a href=\"{safe_u}\">لینک</a>)"
+                    f"  ▫️ <b>{escape_html(off['brand'])}</b> — درج‌شده: <b>{format_toman(off['price_toman'])}</b> ت | "
+                    f"{escape_html(off['shop_name'][:20])} (<a href=\"{safe_u}\">لینک ↗️</a>)"
                 )
 
         lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"⚡ <i>سرعت جمع‌آوری زنده: {report['latency_ms']} میلی‌ثانیه</i>")
+        lines.append(f"⚡ <i>زمان جمع‌آوری زنده: {report['latency_ms']} میلی‌ثانیه • قیمت‌ها بر اساس نرخ همین ساعت است.</i>")
 
         msg_text = "\n".join(lines)
         if len(msg_text) > 3950:
@@ -315,7 +467,7 @@ class BaleBotHandlers:
 
         if data == "main_menu":
             await set_state(chat_id, "IDLE")
-            text = self._build_dashboard_text(user, "داشبورد اصلی مدیریت تایر")
+            text = self._build_dashboard_text(user, "دستیار هوشمند تایر دولتی و قیمت روز")
             if message_id:
                 await self._safe_edit(chat_id, message_id, text, reply_markup=self.get_main_keyboard(user))
             else:
@@ -329,43 +481,59 @@ class BaleBotHandlers:
             text = (
                 "👤 <b>اطلاعات مالک خودرو</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📊 <b>وضعیت تکمیل:</b> <code>{progress_bar}</code>\n\n"
-                f"▫️ <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code> {n_icon}\n"
-                f"▫️ <b>موبایل به نام مالک:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code> {m_icon}\n\n"
-                "💡 <i>فقط همین ۲ مورد برای ورود پیامکی و شکارچی لازم است؛ بقیه مشخصات خودرو موقع خرید نهایی در خود سایت وارد می‌شود.</i>\n\n"
-                "👇 برای ثبت یا ویرایش هر مورد کلیک کنید:"
+                f"📊 <b>پیشرفت تکمیل:</b> <code>{progress_bar}</code>\n\n"
+                f"🆔 <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code> {n_icon}\n"
+                f"📱 <b>موبایل به نام مالک:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code> {m_icon}\n\n"
+                "🛡 <b>چرا فقط همین ۲ مورد را می‌خواهیم؟</b>\n"
+                "▫️ برای ورود پیامکی و روشن‌کردن شکارچی خودکار، فقط همین ۲ مورد لازم است.\n"
+                "▫️ بقیه مشخصات (مثل پلاک، کارت ماشین و آدرس) صرفاً موقع خرید نهایی در <b>خود سایت رسمی کارخانه</b> وارد می‌شود.\n\n"
+                "👇 برای ثبت یا تغییر هر مورد روی دکمه‌اش بزنید:"
             )
             rows = [
                 [
-                    {"text": f"کد ملی {n_icon}", "callback_data": "edit_national_id"},
-                    {"text": f"موبایل {m_icon}", "callback_data": "edit_mobile"},
+                    {"text": f"🆔 کد ملی مالک {n_icon}", "callback_data": "edit_national_id"},
+                    {"text": f"📱 موبایل مالک {m_icon}", "callback_data": "edit_mobile"},
                 ],
             ]
             if pct == 100:
                 rows.append([
                     {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
-                    {"text": "🔐 ورود پیامکی سایت", "callback_data": "auth_real_otp"},
+                    {"text": "🔐 ورود پیامکی کارخانه", "callback_data": "auth_real_otp"},
                 ])
-            rows.append([{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}])
+            rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
             await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
         elif data.startswith("edit_"):
             field = data.replace("edit_", "")
             prompts = {
-                "national_id": ("AWAIT_NAT_ID", "👤 <b>کد ملی ۱۰ رقمی مالک را ارسال کنید:</b>\n<i>مثال: 0012345678</i>"),
-                "mobile": ("AWAIT_MOBILE", "📱 <b>شماره موبایل ۱۱ رقمی به نام مالک را ارسال کنید:</b>\n<i>مثال: 09123456789</i>"),
+                "national_id": (
+                    "AWAIT_NAT_ID",
+                    "🆔 <b>ثبت کد ملی مالک خودرو</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "لطفاً کد ملی <b>۱۰ رقمی</b> مالک خودرو را بدون خط تیره بفرستید:\n"
+                    "📌 <i>مثال:</i> <code>0012345678</code>\n\n"
+                    "💡 <i>نکته: سهمیه تایر دولتی فقط به کد ملی صاحب سند خودرو تعلق می‌گیرد.</i>",
+                ),
+                "mobile": (
+                    "AWAIT_MOBILE",
+                    "📱 <b>ثبت شماره موبایل مالک خودرو</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "لطفاً شماره همراه <b>۱۱ رقمی</b> (حتماً به نام خود مالک) را بفرستید:\n"
+                    "📌 <i>مثال:</i> <code>09123456789</code>\n\n"
+                    "💡 <i>نکته: کد پیامکی ورود سایت‌های دولتی به همین شماره ارسال می‌شود.</i>",
+                ),
             }
             if field in prompts:
                 st, msg = prompts[field]
                 await set_state(chat_id, st)
-                kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
+                kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_profile"}]]}
                 await self._safe_edit(chat_id, message_id, msg, reply_markup=kb)
 
         elif data == "menu_portal":
             cur_p = user.get("target_portal", "all")
             rows: List[List[Dict[str, str]]] = [
                 [{
-                    "text": ("🔘 " if cur_p == "all" else "⚪ ") + "🌐 همه شرکت‌ها (اسکن خودکار سراسری — پیشنهادی)",
+                    "text": ("🟢 " if cur_p == "all" else "⚪ ") + "🌐 همه کارخانه‌ها با هم (هوشمند و پیشنهادی ⭐)",
                     "callback_data": "set_portal_all",
                 }]
             ]
@@ -374,21 +542,23 @@ class BaleBotHandlers:
             for i in range(0, len(factory_keys), 2):
                 pair_btns = []
                 for pk in factory_keys[i : i + 2]:
-                    mark = "🔘 " if pk == cur_p else "⚪ "
+                    mark = "🟢 " if pk == cur_p else "⚪ "
                     pair_btns.append({"text": f"{mark}{PORTALS[pk]['short']}", "callback_data": f"set_portal_{pk}"})
                 rows.append(pair_btns)
 
-            rows.append([{"text": "📡 تست زنده وضعیت همه شرکت‌ها", "callback_data": "live_portals_health"}])
-            rows.append([{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}])
+            rows.append([{"text": "📡 بررسی آنلاین وضعیت همه سایت‌ها", "callback_data": "live_portals_health"}])
+            rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
 
             cur_info = PORTALS.get(cur_p, PORTALS["all"])
+            hours_txt = " ، ".join(cur_info.get("sale_hours", []))
             text = (
-                "🏭 <b>انتخاب کارخانه یا سامانه فروش تایر دولتی</b>\n"
+                "🏭 <b>انتخاب کارخانه و سامانه فروش تایر دولتی</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"✅ <b>انتخاب فعلی:</b> <code>{escape_html(cur_info['title'])}</code>\n"
-                f"ℹ️ <i>{escape_html(cur_info['desc'])}</i>\n\n"
-                "💡 <b>پیشنهاد هوشمند:</b> گزینه «همه شرکت‌ها» را انتخاب کنید تا ربات به‌صورت خودکار تمام سایت‌های باز مثل <b>بارز، هایپرتایر، کویر، ایران‌تایر، یزد، رازی، کیان، آرتاویل، دنا و سامانه تجارت</b> را با هم رصد کند.\n\n"
-                "👇 گزینه دلخواه را انتخاب کنید:"
+                f"🎯 <b>انتخاب فعلی شما:</b> <code>{escape_html(cur_info['title'])}</code>\n"
+                f"⏰ <b>ساعات معمول شارژ:</b> <i>{escape_html(hours_txt)}</i>\n"
+                f"ℹ️ <b>توضیحات:</b> <i>{escape_html(cur_info['desc'])}</i>\n\n"
+                "⭐ <b>پیشنهاد طلایی:</b> گزینه <b>«همه کارخانه‌ها با هم»</b> را انتخاب کنید تا ربات هم‌زمان تمام ۱۰ سایت دولتی (بارز، هایپرتایر، کویر، ایران‌تایر، یزد، رازی، کیان، آرتاویل، دنا و سامانه تجارت) را زیر نظر بگیرد و شانس خریدتان چند برابر شود!\n\n"
+                "👇 کارخانه یا سامانه مورد نظرتان را انتخاب کنید:"
             )
             await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
@@ -399,11 +569,16 @@ class BaleBotHandlers:
             await self._route_callback(chat_id, message_id, "menu_portal")
 
         elif data == "live_portals_health":
-            await self._safe_edit(chat_id, message_id, "📡 <b>در حال بررسی اتصال زنده تمام ۱۰ کارخانه و درگاه دولتی...</b>")
+            await self._safe_edit(
+                chat_id,
+                message_id,
+                "📡 <b>در حال بررسی آنلاین و زنده تمام ۱۰ کارخانه و سامانه دولتی...</b>\n\n⏳ <i>لطفاً چند ثانیه صبر کنید تا پاسخ همه سایت‌ها دریافت شود.</i>",
+            )
             scan = await self.sniper.scan_all_portals_live("all")
             now_fa = get_tehran_now()["compact_fa"]
             lines = [
-                f"🌐 <b>وضعیت برخط سایت‌های تایر دولتی ({now_fa})</b>",
+                f"🌐 <b>گزارش زنده وضعیت سایت‌های تایر دولتی</b>",
+                f"🕒 <i>{now_fa}</i>",
                 "━━━━━━━━━━━━━━━━━━━━\n",
             ]
             for st in scan["portals_status"]:
@@ -419,15 +594,18 @@ class BaleBotHandlers:
                 else:
                     icon = "🔴"
                 lines.append(
-                    f"{icon} <b>{escape_html(st['title'])}</b> ({st['latency_ms']} ms)\n"
+                    f"{icon} <b>{escape_html(st['title'])}</b> <i>({st['latency_ms']} ms)</i>\n"
                     f"   └ {escape_html(st['status_desc'])}"
                 )
             lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-            lines.append("🟢 موجود و باز | 🟡 آنلاین (ناموجود) | 📵 نیازمند قطع فیلترشکن")
+            lines.append("📌 <b>راهنمای رنگ‌ها:</b>\n🟢 موجود و آماده خرید | 🟡 آنلاین (فعلاً ناموجود) | 🛡 محافظ ضدربات | 📵 نیاز به آی‌پی ایران | 🔴 آفلاین")
             kb = {
                 "inline_keyboard": [
-                    [{"text": "🔄 اسکن مجدد", "callback_data": "live_portals_health"}],
-                    [{"text": "🔙 بازگشت به لیست شرکت‌ها", "callback_data": "menu_portal"}],
+                    [
+                        {"text": "🔄 اسکن مجدد زنده", "callback_data": "live_portals_health"},
+                        {"text": "🔙 لیست کارخانه‌ها", "callback_data": "menu_portal"},
+                    ],
+                    [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
             ok_portals = [st["portal"] for st in scan["portals_status"] if st.get("ok")]
@@ -435,6 +613,41 @@ class BaleBotHandlers:
             logger.info(f"[PORTALS_HEALTH] chat={chat_id} ok={len(ok_portals)}/10 in_stock={in_stock_cnt}")
             await log_action(chat_id, "PORTALS_HEALTH", "OK", f"online={len(ok_portals)}/10 in_stock={in_stock_cnt}", 0.0)
             await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup=kb)
+
+        elif data == "menu_car_picker":
+            rows: List[List[Dict[str, str]]] = []
+            car_items = list(CAR_TIRE_CATALOG.items())
+            for i in range(0, len(car_items), 2):
+                pair = []
+                for ck, info in car_items[i : i + 2]:
+                    pair.append({"text": f"🚘 {info['short']}", "callback_data": f"car_{ck}"})
+                rows.append(pair)
+            rows.append([{"text": "✍️ تایپ سایز دلخواه", "callback_data": "ask_custom_market_size"}])
+            rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
+            text = (
+                "🚘 <b>انتخاب هوشمند سایز تایر بر اساس نام خودرو</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "نیازی نیست سایز تایر خودروی خود را حفظ باشید!\n"
+                "فقط روی مدل ماشینتان بزنید (یا اسمش را توی چت بنویسید) تا هم <b>سایز فابریک</b> و هم <b>سایز پهن مناسب</b> همراه با قیمت روز و شکارچی دولتی برایتان باز شود.\n\n"
+                "👇 خودروی خود را انتخاب کنید:"
+            )
+            await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+
+        elif data.startswith("car_"):
+            car_key = data.replace("car_", "")
+            await self._send_car_recommendation(chat_id, car_key, edit_msg_id=message_id)
+
+        elif data == "compare_gov_market":
+            cur_sz = user.get("target_tire_size", "185_65_14")
+            await self._send_gov_vs_market_comparison(
+                chat_id, cur_sz, tire_count=user.get("tire_count", 2), edit_msg_id=message_id
+            )
+
+        elif data.startswith("cmp_"):
+            sk = data.replace("cmp_", "")
+            await self._send_gov_vs_market_comparison(
+                chat_id, sk, tire_count=user.get("tire_count", 2), edit_msg_id=message_id
+            )
 
         elif data in ("menu_size", "menu_size_catalog"):
             show_catalog = (data == "menu_size_catalog")
@@ -445,7 +658,7 @@ class BaleBotHandlers:
             await self._safe_edit(
                 chat_id,
                 message_id,
-                "⏳ <b>در حال دریافت لیست زنده سایزها از موجودی سایت‌های دولتی...</b>",
+                "🛞 <b>در حال دریافت لیست زنده سایزها از انبار سایت‌های دولتی...</b>\n\n⏳ <i>فقط سایزهای واقعی موجود و کاتالوگ سایت‌ها بارگذاری می‌شوند.</i>",
             )
             scan = await self.sniper.scan_all_portals_live(cur_portal)
             avail = scan["available_sizes"]
@@ -453,13 +666,13 @@ class BaleBotHandlers:
 
             rows: List[List[Dict[str, str]]] = []
             lines: List[str] = [
-                "🛞 <b>سایزهای تایر دولتی (فقط بر اساس موجودی سایت‌ها)</b>",
-                f"🕒 <i>به‌روزرسانی لحظه‌ای: {get_tehran_now()['compact_fa']}</i>",
+                "🛞 <b>انتخاب سایز تایر دولتی (فقط بر اساس موجودی سایت‌ها)</b>",
+                f"🕒 <i>بروزرسانی زنده انبار: {get_tehran_now()['compact_fa']}</i>",
                 "━━━━━━━━━━━━━━━━━━━━\n",
             ]
 
             if avail:
-                lines.append("🟢 <b>سایزهای واقعاً موجود در این لحظه:</b>")
+                lines.append("🟢 <b>سایزهای واقعاً موجود و آماده خرید در همین لحظه:</b>")
                 sorted_avail = sorted(avail.values(), key=lambda x: x["size"])
                 for item in sorted_avail:
                     sk = item["size_key"]
@@ -467,43 +680,46 @@ class BaleBotHandlers:
                     pr = format_short_million(item["min_price_toman"]) if item["min_price_toman"] else "-"
                     p_str = "، ".join(item["portals"])
                     mark = "✅" if sk == current_size else "🟢"
-                    lines.append(f"▫️ <code>{sz}</code> — {escape_html(p_str)} (از {format_toman(item['min_price_toman'])} ت | {item['count']} مدل)")
+                    lines.append(f"  ▫️ <code>{sz}</code> — {escape_html(p_str)} (از {format_toman(item['min_price_toman'])} ت | {item['count']} مدل)")
                     rows.append([{
-                        "text": f"{mark} {sz} • {p_str} ({pr})",
+                        "text": f"{mark} {sz}  •  {p_str} ({pr})",
                         "callback_data": f"set_size_{sk}",
                     }])
                 lines.append("")
             else:
-                lines.append("🔴 <b>در این دقیقه هیچ سایزی در انبار دولتی باز نیست.</b>\n")
+                lines.append(
+                    "🔴 <b>در این لحظه هیچ سایزی در انبار دولتی باز نیست.</b>\n"
+                    "💡 <i>نگران نباشید! از دکمه «سایزهای در صف شارژ» زیر، سایز خودروی خود را انتخاب کنید تا شکارچی به محض بازشدن آن را برای شما شکار کند.</i>\n"
+                )
 
             if show_catalog and cat_sizes:
-                lines.append("📋 <b>سایزهای ثبت‌شده در کاتالوگ سایت‌ها (در صف شارژ برای شکارچی):</b>")
-                # چیدمان تمیز ۲ ستونی
+                lines.append("⏳ <b>سایزهای کاتالوگ سایت‌ها (در صف شارژ برای شکارچی خودکار):</b>")
                 extra_btns: List[Dict[str, str]] = []
                 for sz in cat_sizes:
                     sk = size_to_key(sz)
                     if sk in avail:
                         continue
-                    mark = "🔘 " if sk == current_size else "⏳ "
+                    mark = "🟢 " if sk == current_size else "⏳ "
                     extra_btns.append({"text": f"{mark}{sz}", "callback_data": f"set_size_{sk}"})
                 for i in range(0, len(extra_btns), 2):
                     rows.append(extra_btns[i : i + 2])
             elif cat_sizes:
-                rows.append([{"text": f"⏳ سایر سایزهای کاتالوگ سایت‌ها ({len(cat_sizes)} سایز)", "callback_data": "menu_size_catalog"}])
+                rows.append([{"text": f"⏳ مشاهده سایر سایزهای کاتالوگ ({len(cat_sizes)} سایز)", "callback_data": "menu_size_catalog"}])
 
-            c2 = "🔘 ۲ حلقه" if count == 2 else "⚪ ۲ حلقه"
-            c4 = "🔘 ۴ حلقه" if count == 4 else "⚪ ۴ حلقه"
+            c2 = "🟢 ۲ حلقه (یک جفت)" if count == 2 else "⚪ ۲ حلقه (یک جفت)"
+            c4 = "🟢 ۴ حلقه (سهمیه کامل)" if count == 4 else "⚪ ۴ حلقه (سهمیه کامل)"
             rows.append([
                 {"text": c2, "callback_data": "set_count_2"},
                 {"text": c4, "callback_data": "set_count_4"},
             ])
             rows.append([
-                {"text": "🔄 رفرش موجودی", "callback_data": "menu_size"},
+                {"text": "🔄 بروزرسانی موجودی", "callback_data": "menu_size"},
                 {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
             ])
 
-            lines.append(f"🎯 <b>سایز فعلی شما:</b> <code>{escape_html(self._format_size_label(current_size))}</code> (<b>{count} حلقه</b>)")
-            lines.append("👇 برای انتخاب روی سایز کلیک کنید:")
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"🎯 <b>انتخاب فعلی شما:</b> <code>{escape_html(self._format_size_label(current_size))}</code> — <b>{count} حلقه</b>")
+            lines.append("👇 سایز و تعداد حلقه مورد نظرتان را انتخاب کنید:")
             logger.info(f"[MENU_SIZE] chat={chat_id} portal={cur_portal} live_sizes={len(avail)} catalog_sizes={len(cat_sizes)}")
             await log_action(chat_id, "MENU_SIZE", "OK", f"portal={cur_portal} live_sizes={len(avail)} catalog={len(cat_sizes)}", 0.0)
             await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup={"inline_keyboard": rows})
@@ -516,11 +732,11 @@ class BaleBotHandlers:
             kb = {
                 "inline_keyboard": [
                     [
-                        {"text": "📦 بررسی جزئیات خرید همین سایز", "callback_data": "live_check_stock"},
-                        {"text": "💰 قیمت آزاد همین سایز", "callback_data": f"mkt_{new_size}"},
+                        {"text": "📦 بررسی موجودی دولتی", "callback_data": "live_check_stock"},
+                        {"text": "💰 قیمت آزاد این سایز", "callback_data": f"mkt_{new_size}"},
                     ],
                     [
-                        {"text": "⚡ روشن‌کردن شکارچی برای این سایز", "callback_data": "menu_sniper"},
+                        {"text": "⚡ روشن‌کردن شکارچی", "callback_data": "menu_sniper"},
                         {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
                     ],
                 ]
@@ -528,7 +744,13 @@ class BaleBotHandlers:
             await self._safe_edit(
                 chat_id,
                 message_id,
-                f"✅ <b>سایز هدف شما با موفقیت تنظیم شد:</b>\n\n🛞 <code>{escape_html(self._format_size_label(norm))}</code>",
+                (
+                    "✅ <b>سایز هدف شما با موفقیت ذخیره شد!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🛞 <b>سایز انتخابی:</b> <code>{escape_html(self._format_size_label(norm))}</code>\n"
+                    f"📦 <b>تعداد درخواستی:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n\n"
+                    "👇 قدم بعدی را انتخاب کنید:"
+                ),
                 reply_markup=kb,
             )
 
@@ -542,28 +764,34 @@ class BaleBotHandlers:
             for i in range(0, len(MARKET_TIRE_SIZES), 2):
                 pair = []
                 for sz, car in MARKET_TIRE_SIZES[i : i + 2]:
-                    pair.append({"text": f"🛞 {sz} ({car})", "callback_data": f"mkt_{size_to_key(sz)}"})
+                    pair.append({"text": f"🛞 {sz} • {car}", "callback_data": f"mkt_{size_to_key(sz)}"})
                 rows.append(pair)
             rows.append([{"text": "✍️ تایپ سایز دلخواه (مثلاً 225/55R19)", "callback_data": "ask_custom_market_size"}])
-            rows.append([{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}])
+            rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
 
             now_fa = get_tehran_now()["full_fa"]
             text = (
                 "💰 <b>استعلام زنده قیمت روز لاستیک آزاد</b>\n"
                 f"🕒 <i>{now_fa}</i>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "ربات هم‌زمان به فروشگاه‌های سراسر کشور متصل می‌شود و دقیق‌ترین نرخ این ساعت را با تفکیک <b>تک حلقه</b> و <b>جفت</b> محاسبه می‌کند.\n\n"
+                "🌐 ربات هم‌زمان به <b>دیجی‌کالا، ترب، باسلام و هایپرتایر</b> وصل می‌شود، آگهی‌های متفرقه را حذف می‌کند و دقیق‌ترین نرخ همین ساعت را با تفکیک <b>تک‌حلقه</b> و <b>جفت</b> به شما نشان می‌دهد.\n\n"
                 "👇 سایز خودروی خود را انتخاب کنید یا دستی تایپ کنید:"
             )
             await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
         elif data == "ask_custom_market_size":
             await set_state(chat_id, "AWAIT_MARKET_SIZE")
-            kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_market_price"}]]}
+            kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_market_price"}]]}
             await self._safe_edit(
                 chat_id,
                 message_id,
-                "✍️ <b>سایز تایر مورد نظر را بفرستید:</b>\n\nمثال: <code>185/65R14</code> یا <code>205/60/15</code> یا <code>225/55R19</code>",
+                (
+                    "✍️ <b>تایپ سایز دلخواه برای استعلام قیمت روز</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "سایز روی دیواره لاستیک خودروی خود را بفرستید:\n"
+                    "📌 <i>مثال‌ها:</i> <code>185/65R14</code> • <code>205/60/15</code> • <code>225/55R19</code>\n\n"
+                    "💡 <i>حتی با اعداد فارسی هم بنویسید ربات هوشمندانه تشخیص می‌دهد!</i>"
+                ),
                 reply_markup=kb,
             )
 
@@ -578,27 +806,30 @@ class BaleBotHandlers:
         elif data == "menu_sniper":
             is_active = user.get("sniper_enabled", 0)
             status_badge = "🟢 <b>فعال و در حال پایش زنده</b>" if is_active else "🔴 <b>خاموش</b>"
-            btn_toggle = "🛑 خاموش کردن شکارچی" if is_active else "⚡ روشن کردن شکارچی خودکار"
+            btn_toggle = "🛑 خاموش کردن شکارچی خودکار" if is_active else "🚀 روشن کردن شکارچی خودکار"
             portal_name = PORTALS.get(user.get("target_portal", "all"), PORTALS["all"]).get("title", "")
             size_name = self._format_size_label(user.get("target_tire_size", "185_65_14"))
 
             text = (
-                "⚡ <b>مدیریت شکارچی خودکار تایر دولتی</b>\n"
+                "⚡ <b>مرکز کنترل شکارچی خودکار تایر دولتی</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📡 <b>وضعیت کنونی:</b> {status_badge}\n"
-                f"🏭 <b>شرکت‌های تحت نظر:</b> <code>{escape_html(portal_name)}</code>\n"
-                f"🛞 <b>سایز انتخابی:</b> <code>{escape_html(size_name)}</code>\n"
+                f"📡 <b>وضعیت فعلی:</b> {status_badge}\n"
+                f"🏭 <b>کارخانه‌های زیر نظر:</b> <code>{escape_html(portal_name)}</code>\n"
+                f"🛞 <b>سایز هدف شما:</b> <code>{escape_html(size_name)}</code>\n"
                 f"📦 <b>تعداد درخواستی:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n\n"
-                "⚙️ <i>ربات هر چند ثانیه موجودی واقعی تمام سایت‌های هدف را چک می‌کند و به محض بازشدن، رزرو و لینک پرداخت را ارسال می‌نماید.</i>"
+                "🤖 <b>شکارچی دقیقاً چطور کار می‌کند؟</b>\n"
+                "▫️ شبانه‌روزی و هر چند ثانیه یک‌بار، انبار سایت‌های دولتی را به جای شما چک می‌کند.\n"
+                "▫️ به محض باز شدن سایز مورد نظرتان، سریع پیام هشدار، قیمت مصوب و لینک مستقیم خرید/رزرو را همین‌جا برایتان می‌فرستد!\n\n"
+                "👇 وضعیت شکارچی یا تنظیمات آن را مدیریت کنید:"
             )
             kb = {
                 "inline_keyboard": [
                     [{"text": btn_toggle, "callback_data": "toggle_sniper"}],
                     [
-                        {"text": "🏭 تغییر شرکت هدف", "callback_data": "menu_portal"},
-                        {"text": "🛞 تغییر سایز موجود", "callback_data": "menu_size"},
+                        {"text": "🏭 تغییر کارخانه هدف", "callback_data": "menu_portal"},
+                        {"text": "🛞 تغییر سایز و تعداد", "callback_data": "menu_size"},
                     ],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
             await self._safe_edit(chat_id, message_id, text, reply_markup=kb)
@@ -611,14 +842,18 @@ class BaleBotHandlers:
                 if not user.get("national_id") or not user.get("mobile"):
                     miss_kb = {
                         "inline_keyboard": [
-                            [{"text": "👤 تکمیل کد ملی و موبایل", "callback_data": "menu_profile"}],
-                            [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                            [{"text": "👤 ثبت سریع کد ملی و موبایل", "callback_data": "menu_profile"}],
+                            [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                         ]
                     }
                     await self._safe_edit(
                         chat_id,
                         message_id,
-                        "⚠️ <b>اطلاعات مالک ناقص است!</b>\nلطفاً ابتدا در بخش «👤 اطلاعات مالک»، <b>کد ملی</b> و <b>شماره موبایل</b> را ثبت کنید.",
+                        (
+                            "⚠️ <b>اطلاعات مالک هنوز کامل نیست!</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n\n"
+                            "برای اینکه شکارچی خودکار بتواند برایتان فعال شود، لطفاً ابتدا فقط <b>کد ملی</b> و <b>شماره موبایل</b> مالک را ثبت کنید (کمتر از ۲۰ ثانیه وقت می‌برد)."
+                        ),
                         reply_markup=miss_kb,
                     )
                     return
@@ -627,7 +862,11 @@ class BaleBotHandlers:
             await self._route_callback(chat_id, message_id, "menu_sniper")
 
         elif data == "live_check_stock":
-            await self._safe_edit(chat_id, message_id, "📡 <b>در حال استعلام زنده و مستقیم موجودی از سایت‌های دولتی...</b>")
+            await self._safe_edit(
+                chat_id,
+                message_id,
+                "📦 <b>در حال استعلام زنده و مستقیم از انبار کارخانه‌های دولتی...</b>\n\n⏳ <i>در حال بررسی لحظه‌ای موجودی و قیمت‌های مصوب...</i>",
+            )
             stock_info = await self.sniper.check_live_stock_now(chat_id)
             p_title = PORTALS.get(stock_info["portal"], PORTALS["all"]).get("title", stock_info["portal"])
             matched = stock_info["matched_items"]
@@ -635,43 +874,47 @@ class BaleBotHandlers:
             now_fa = get_tehran_now()["compact_fa"]
 
             lines = [
-                f"📦 <b>گزارش زنده انبار دولتی ({now_fa})</b>",
+                f"📦 <b>گزارش زنده انبار تایر دولتی</b>",
+                f"🕒 <i>{now_fa}</i>",
                 "━━━━━━━━━━━━━━━━━━━━\n",
                 f"🏭 <b>دامنه بررسی:</b> <code>{escape_html(p_title)}</code>",
                 f"🎯 <b>سایز هدف شما:</b> <code>{escape_html(stock_info['tire_size_display'])}</code>\n",
             ]
 
             if matched:
-                lines.append(f"🎉 <b>فوری: {len(matched)} مدل از سایز شما همین الان موجود است!</b>")
+                lines.append(f"🎉 <b>خبر عالی! {len(matched)} مدل از سایز شما همین الان موجود است:</b>")
                 for it in matched[:5]:
                     safe_it_u = html.escape(str(it.get("url") or ""), quote=True)
                     lines.append(
-                        f"🟢 <b>{escape_html(it.get('brand', ''))} {escape_html(it.get('model', ''))}</b> — "
+                        f"  🟢 <b>{escape_html(it.get('brand', ''))} {escape_html(it.get('model', ''))}</b> — "
                         f"<b>{format_toman(it.get('price_toman', 0))}</b> ت | {escape_html(it.get('portal_title', ''))}\n"
-                        f"   🔗 <a href=\"{safe_it_u}\">مشاهده و خرید مستقیم</a>"
+                        f"     🔗 <a href=\"{safe_it_u}\">ورود و خرید مستقیم ↗️</a>"
                     )
-                lines.append("\n⚡ برای رزرو سریع دکمه «⚡ شکارچی خودکار» را بزنید یا مستقیم از لینک بالا بخرید.")
+                lines.append("\n⚡ <i>پیشنهاد: همین الان از لینک بالا خرید کنید یا شکارچی خودکار را روشن بگذارید.</i>")
             else:
-                lines.append(f"🔴 سایز انتخابی شما (<code>{escape_html(stock_info['tire_size_display'])}</code>) در این دقیقه موجود نیست.")
+                lines.append(
+                    f"🔴 سایز انتخابی شما (<code>{escape_html(stock_info['tire_size_display'])}</code>) در این دقیقه موجود نیست.\n"
+                    "💡 <i>اگر «شکارچی خودکار» را روشن کنید، به محض شارژ شدن به شما خبر می‌دهیم.</i>"
+                )
 
             if all_avail:
-                lines.append("\n🟢 <b>سایزهایی که همین الان در سایت‌ها موجود هستند:</b>")
+                lines.append("\n🟢 <b>سایزهایی که همین الان در سایت‌های دولتی باز هستند:</b>")
                 for bucket in sorted(all_avail.values(), key=lambda b: b["size"])[:8]:
-                    pr_txt = f"{format_toman(bucket['min_price_toman'])} ت" if bucket["min_price_toman"] else ""
-                    lines.append(f"▫️ <code>{bucket['size']}</code> ({'، '.join(bucket['portals'])}) {pr_txt}")
+                    pr_txt = f"— از <b>{format_toman(bucket['min_price_toman'])}</b> ت" if bucket["min_price_toman"] else ""
+                    lines.append(f"  ▫️ <code>{bucket['size']}</code> ({'، '.join(bucket['portals'])}) {pr_txt}")
 
             kb = {
                 "inline_keyboard": [
                     [
-                        {"text": "🔄 استعلام مجدد", "callback_data": "live_check_stock"},
+                        {"text": "🔄 استعلام مجدد انبار", "callback_data": "live_check_stock"},
                         {"text": "💰 قیمت آزاد این سایز", "callback_data": f"mkt_{stock_info['tire_size']}"},
                     ],
                     [
                         {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
-                        {"text": "🛞 تغییر سایز موجود", "callback_data": "menu_size"},
+                        {"text": "🛞 تغییر سایز هدف", "callback_data": "menu_size"},
                     ],
                     [
-                        {"text": "🏭 تغییر شرکت هدف", "callback_data": "menu_portal"},
+                        {"text": "🏭 تغییر کارخانه هدف", "callback_data": "menu_portal"},
                         {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
                     ],
                 ]
@@ -693,14 +936,18 @@ class BaleBotHandlers:
             if not user.get("mobile"):
                 miss_kb = {
                     "inline_keyboard": [
-                        [{"text": "👤 ثبت شماره موبایل", "callback_data": "menu_profile"}],
-                        [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                        [{"text": "📱 ثبت شماره موبایل مالک", "callback_data": "menu_profile"}],
+                        [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                     ]
                 }
                 await self._safe_edit(
                     chat_id,
                     message_id,
-                    "⚠️ <b>شماره موبایل یافت نشد!</b>\nلطفاً ابتدا در بخش «👤 اطلاعات مالک» شماره همراه مالک را ثبت کنید.",
+                    (
+                        "⚠️ <b>شماره موبایل هنوز ثبت نشده است!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "برای دریافت کد پیامکی ورود از سایت کارخانه، لطفاً ابتدا شماره همراه مالک خودرو را در بخش «👤 اطلاعات مالک» ثبت کنید."
+                    ),
                     reply_markup=miss_kb,
                 )
                 return
@@ -709,16 +956,23 @@ class BaleBotHandlers:
                 kb = {
                     "inline_keyboard": [
                         [
-                            {"text": "🏭 ارسال پیامک سایت بارز", "callback_data": "otp_send_barez"},
-                            {"text": "🏭 ارسال پیامک کویرتایر", "callback_data": "otp_send_kavir"},
+                            {"text": "🏭 پیامک ورود بارز", "callback_data": "otp_send_barez"},
+                            {"text": "🏭 پیامک ورود کویرتایر", "callback_data": "otp_send_kavir"},
                         ],
-                        [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                        [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                     ]
                 }
                 await self._safe_edit(
                     chat_id,
                     message_id,
-                    "🔐 <b>ورود پیامکی مستقیم به حساب کارخانه</b>\n\nبرای کدام سایت می‌خواهید کد پیامکی احراز هویت دریافت کنید؟",
+                    (
+                        "🔐 <b>ورود پیامکی مستقیم به حساب کارخانه</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📱 <b>شماره ثبت‌شده شما:</b> <code>{user.get('mobile')}</code>\n\n"
+                        "ℹ️ <b>این بخش چه کمکی می‌کند؟</b>\n"
+                        "با تایید یک‌باره کد پیامکی رسمی، نشست (سشن) ورود شما در سایت کارخانه آماده می‌شود تا هنگام باز شدن ظرفیت، بدون معطلی وارد شوید.\n\n"
+                        "👇 کد پیامکی از کدام کارخانه برایتان ارسال شود؟"
+                    ),
                     reply_markup=kb,
                 )
                 return
@@ -726,10 +980,11 @@ class BaleBotHandlers:
 
         elif data.startswith("otp_send_"):
             otp_portal = data.replace("otp_send_", "")
+            p_short = PORTALS.get(otp_portal, {}).get("short", otp_portal)
             await self._safe_edit(
                 chat_id,
                 message_id,
-                f"📲 <b>در حال ارسال درخواست پیامک از {PORTALS.get(otp_portal, {}).get('short', otp_portal)} به {user.get('mobile')}...</b>",
+                f"📲 <b>در حال ارسال درخواست کد پیامکی از {escape_html(p_short)} به شماره <code>{user.get('mobile')}</code>...</b>",
             )
             res = await self.sniper.request_real_otp(chat_id, portal_override=otp_portal)
             logger.info(f"[OTP_SEND] chat={chat_id} portal={otp_portal} ok={res.get('ok')} latency={res.get('latency_ms', 0)}ms")
@@ -742,60 +997,90 @@ class BaleBotHandlers:
             )
             if res.get("ok"):
                 await set_state(chat_id, f"AWAIT_REAL_OTP_{otp_portal.upper()}")
-                kb = {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "main_menu"}]]}
+                kb = {"inline_keyboard": [[{"text": "🔙 انصراف و منوی اصلی", "callback_data": "main_menu"}]]}
                 await self._safe_edit(
                     chat_id,
                     message_id,
-                    f"📩 <b>کد پیامکی ارسال شد!</b>\n\nلطفاً کد تایید دریافتی روی شماره <code>{user.get('mobile')}</code> را اینجا بفرستید:",
+                    (
+                        "📩 <b>کد پیامکی با موفقیت ارسال شد!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"لطفاً کد تاییدی که روی شماره <code>{user.get('mobile')}</code> دریافت کردید را همین‌جا تایپ و ارسال کنید:"
+                    ),
                     reply_markup=kb,
                 )
             else:
-                kb = {"inline_keyboard": [[{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}]]}
-                await self._safe_edit(chat_id, message_id, f"❌ <b>عدم موفقیت در ارسال پیامک:</b>\n\n{escape_html(res.get('message', ''))}", reply_markup=kb)
+                kb = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🔄 تلاش مجدد", "callback_data": f"otp_send_{otp_portal}"},
+                            {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                        ]
+                    ]
+                }
+                await self._safe_edit(
+                    chat_id,
+                    message_id,
+                    f"❌ <b>ارسال پیامک انجام نشد:</b>\n━━━━━━━━━━━━━━━━━━━━\n\n{escape_html(res.get('message', ''))}",
+                    reply_markup=kb,
+                )
 
         elif data == "view_profile":
             p_name = PORTALS.get(user.get("target_portal", "all"), PORTALS["all"]).get("title", "")
             s_name = self._format_size_label(user.get("target_tire_size", "185_65_14"))
-            sniper_st = "🟢 <b>روشن</b>" if user.get("sniper_enabled", 0) else "🔴 <b>خاموش</b>"
+            sniper_st = "🟢 <b>روشن و فعال</b>" if user.get("sniper_enabled", 0) else "🔴 <b>خاموش</b>"
             _, progress_bar = self.calculate_profile_completion(user)
 
             summary = (
-                "📋 <b>شناسنامه و تنظیمات شما</b>\n"
+                "📋 <b>وضعیت و پروفایل کاربری شما</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"👤 <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
+                f"🆔 <b>کد ملی مالک:</b> <code>{user.get('national_id') or 'ثبت نشده'}</code>\n"
                 f"📱 <b>موبایل مالک:</b> <code>{user.get('mobile') or 'ثبت نشده'}</code>\n\n"
-                f"🏭 <b>شرکت هدف:</b> <code>{escape_html(p_name)}</code>\n"
-                f"🛞 <b>سایز هدف:</b> <code>{escape_html(s_name)}</code> (<b>{user.get('tire_count', 2)} حلقه</b>)\n"
-                f"⚡ <b>شکارچی:</b> {sniper_st}\n"
-                f"📊 <b>آمادگی:</b> <code>{progress_bar}</code>"
+                f"🏭 <b>کارخانه هدف:</b> <code>{escape_html(p_name)}</code>\n"
+                f"🛞 <b>سایز انتخابی:</b> <code>{escape_html(s_name)}</code>\n"
+                f"📦 <b>تعداد درخواستی:</b> <b>{user.get('tire_count', 2)} حلقه</b>\n"
+                f"⚡ <b>وضعیت شکارچی:</b> {sniper_st}\n"
+                f"📊 <b>میزان آمادگی:</b> <code>{progress_bar}</code>"
             )
             kb = {
                 "inline_keyboard": [
-                    [{"text": "✏️ ویرایش اطلاعات مالک", "callback_data": "menu_profile"}],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    [
+                        {"text": "✏️ ویرایش اطلاعات مالک", "callback_data": "menu_profile"},
+                        {"text": "⚡ تنظیمات شکارچی", "callback_data": "menu_sniper"},
+                    ],
+                    [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}],
                 ]
             }
             await self._safe_edit(chat_id, message_id, summary, reply_markup=kb)
 
         elif data == "menu_guide":
             guide_text = (
-                "📖 <b>راهنمای استفاده سریع از ربات</b>\n"
+                "📖 <b>راهنمای جامع خرید تایر دولتی و قیمت روز</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "1️⃣ <b>اطلاعات مالک:</b> از بخش «👤 اطلاعات مالک» فقط کد ملی و شماره موبایل به نام مالک را ثبت کنید (سایر مشخصات خودرو هنگام پرداخت در خود سایت وارد می‌شود).\n"
-                "2️⃣ <b>موجودی دولتی:</b> دکمه «🛞 سایزها» فقط بر اساس موجودی لحظه‌ای سایت‌ها به شما نمایش می‌دهد چه سایزی باز است.\n"
-                "3️⃣ <b>شکارچی خودکار:</b> روی «همه شرکت‌ها» بگذارید و روشن کنید تا تمام سایت‌های دولتی هم‌زمان رصد شوند.\n"
-                "4️⃣ <b>قیمت روز تایر آزاد:</b> با زدن «💰 قیمت روز تایر آزاد» یا تایپ مستقیم سایز (مثلاً <code>185/65R14</code>) نرخ همان ساعت را از فروشگاه‌های کشور بگیرید.\n\n"
-                "⌨️ <b>دستورات سریع متنی:</b>\n"
-                "<code>/start</code> منوی اصلی • <code>/stock</code> موجودی دولتی • <code>/price</code> قیمت آزاد • <code>/sniper</code> شکارچی • <code>/profile</code> اطلاعات مالک\n\n"
-                "⏰ <b>نکته مهم برای کویرتایر و سامانه تجارت:</b> هنگام استفاده از بخش دولتی این دو سایت، حتماً فیلترشکن دستگاه/سرور خاموش باشد."
+                "1️⃣ <b>اطلاعات مالک (فقط ۲ مورد):</b>\n"
+                "   در بخش «👤 اطلاعات مالک»، فقط <b>کد ملی</b> و <b>موبایل به نام مالک</b> را وارد کنید. بقیه اطلاعات خودرو موقع پرداخت نهایی در خود سایت کارخانه ثبت می‌شود.\n\n"
+                "2️⃣ <b>انتخاب کارخانه و سایز:</b>\n"
+                "   کارخانه هدف را روی <b>«همه کارخانه‌ها»</b> بگذارید و از بخش «🛞 سایز» اندازه تایر و تعداد حلقه (۲ یا ۴ حلقه) را مشخص کنید.\n\n"
+                "3️⃣ <b>شکارچی خودکار (مهم‌ترین بخش):</b>\n"
+                "   وقتی شکارچی را روشن کنید، ربات هر چند ثانیه انبار ۱۰ سایت دولتی را می‌گردد و به محض باز شدن سایزتان، فوری خبرتان می‌کند.\n\n"
+                "4️⃣ <b>قیمت لحظه‌ای بازار آزاد:</b>\n"
+                "   روی «💰 قیمت روز بازار آزاد» بزنید یا خیلی راحت سایز تایر (مثل <code>185/65R14</code>) را همین‌جا بفرستید تا قیمت دقیق همین ساعت را از ۴ مرجع معتبر بگیرید.\n\n"
+                "⏰ <b>نکات طلایی سهمیه دولتی:</b>\n"
+                "▫️ سهمیه هر خودرو <b>۴ حلقه در سال</b> به نام مالک رسمی است.\n"
+                "▫️ بیشترین زمان شارژ سایت‌ها معمولاً صبح‌ها <b>۰۸:۳۰ تا ۱۱:۳۰</b> است.\n"
+                "▫️ هنگام باز کردن لینک خرید کویرتایر و سامانه تجارت، فیلترشکن گوشی را خاموش کنید.\n\n"
+                "⌨️ <b>دستورات سریع:</b>\n"
+                "<code>/start</code> منوی اصلی • <code>/stock</code> انبار دولتی • <code>/price</code> قیمت آزاد • <code>/sniper</code> شکارچی • <code>/profile</code> اطلاعات مالک"
             )
             kb = {
                 "inline_keyboard": [
                     [
+                        {"text": "👤 تکمیل اطلاعات مالک", "callback_data": "menu_profile"},
                         {"text": "⚡ شکارچی خودکار", "callback_data": "menu_sniper"},
-                        {"text": "💰 قیمت روز تایر آزاد", "callback_data": "menu_market_price"},
                     ],
-                    [{"text": "🏠 منوی اصلی", "callback_data": "main_menu"}],
+                    [
+                        {"text": "💰 قیمت روز بازار آزاد", "callback_data": "menu_market_price"},
+                        {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    ],
                 ]
             }
             await self._safe_edit(chat_id, message_id, guide_text, reply_markup=kb)
@@ -824,6 +1109,10 @@ class BaleBotHandlers:
                 await self._route_callback(chat_id, None, "menu_sniper")
             elif cmd == "/profile":
                 await self._route_callback(chat_id, None, "menu_profile")
+            elif cmd == "/car":
+                await self._route_callback(chat_id, None, "menu_car_picker")
+            elif cmd == "/compare":
+                await self._route_callback(chat_id, None, "compare_gov_market")
             elif cmd == "/help":
                 await self._route_callback(chat_id, None, "menu_guide")
             else:
@@ -838,32 +1127,70 @@ class BaleBotHandlers:
 
         if state == "AWAIT_NAT_ID":
             cleaned = re.sub(r"\D", "", text)
-            if len(cleaned) == 10:
-                await upsert_user(chat_id, national_id=cleaned, state="IDLE")
-                await self.bot.send_message(chat_id, f"✅ <b>کد ملی ثبت شد:</b> <code>{cleaned}</code>", reply_markup=self._profile_saved_keyboard())
+            if is_valid_iran_national_id(cleaned):
+                if not user.get("mobile"):
+                    await upsert_user(chat_id, national_id=cleaned, state="AWAIT_MOBILE")
+                    next_kb = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "👤 برگشت به اطلاعات مالک", "callback_data": "menu_profile"},
+                                {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                            ]
+                        ]
+                    }
+                    await self.bot.send_message(
+                        chat_id,
+                        (
+                            f"✅ <b>کد ملی با موفقیت تایید و ثبت شد!</b>\n🆔 <code>{cleaned}</code>\n\n"
+                            "📱 <b>قدم دوم (آخرین مرحله):</b>\n"
+                            "حالا شماره موبایل <b>۱۱ رقمی به نام مالک</b> را بفرستید تا پروفایل شما ۱۰۰٪ تکمیل شود:\n"
+                            "📌 <i>مثال:</i> <code>09123456789</code>"
+                        ),
+                        reply_markup=next_kb,
+                    )
+                else:
+                    await upsert_user(chat_id, national_id=cleaned, state="IDLE")
+                    await self.bot.send_message(
+                        chat_id,
+                        f"🎉 <b>کد ملی ثبت شد و پروفایل شما ۱۰۰٪ کامل است!</b>\n🆔 <code>{cleaned}</code>\n\n👇 می‌توانید همین الان شکارچی خودکار را روشن کنید:",
+                        reply_markup=self._profile_saved_keyboard(),
+                    )
             else:
-                cancel_kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
-                await self.bot.send_message(chat_id, "❌ کد ملی باید ۱۰ رقم باشد. دوباره بفرستید:", reply_markup=cancel_kb)
+                cancel_kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_profile"}]]}
+                await self.bot.send_message(
+                    chat_id,
+                    "❌ <b>کد ملی واردشده معتبر نیست!</b>\nلطفاً یک کد ملی واقعی <b>۱۰ رقمی</b> (بدون خط تیره و اشتباه تایپی) دوباره بفرستید:",
+                    reply_markup=cancel_kb,
+                )
 
         elif state == "AWAIT_MOBILE":
             cleaned = re.sub(r"\D", "", text)
             if len(cleaned) == 11 and cleaned.startswith("09"):
-                await upsert_user(chat_id, mobile=cleaned, state="IDLE")
-                await self.bot.send_message(chat_id, f"✅ <b>موبایل ذخیره شد:</b> <code>{cleaned}</code>", reply_markup=self._profile_saved_keyboard())
+                updated_user = await upsert_user(chat_id, mobile=cleaned, state="IDLE")
+                done_note = "🎉 <b>پروفایل شما ۱۰۰٪ تکمیل شد و آماده روشن‌کردن شکارچی است!</b>" if updated_user.get("national_id") else "✅ <b>شماره موبایل با موفقیت ذخیره شد!</b>"
+                await self.bot.send_message(
+                    chat_id,
+                    f"{done_note}\n📱 <code>{cleaned}</code>\n\n👇 از دکمه‌های زیر ادامه دهید:",
+                    reply_markup=self._profile_saved_keyboard(),
+                )
             else:
-                cancel_kb = {"inline_keyboard": [[{"text": "❌ انصراف و بازگشت", "callback_data": "menu_profile"}]]}
-                await self.bot.send_message(chat_id, "❌ شماره موبایل نامعتبر است (مثال: <code>09121234567</code>):", reply_markup=cancel_kb)
+                cancel_kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_profile"}]]}
+                await self.bot.send_message(
+                    chat_id,
+                    "❌ <b>شماره موبایل نامعتبر است!</b>\nلطفاً شماره ۱۱ رقمی با شروع <code>09</code> بفرستید (مثلاً <code>09121234567</code>):",
+                    reply_markup=cancel_kb,
+                )
 
         elif state.startswith("AWAIT_REAL_OTP"):
             otp_portal = "barez" if "BAREZ" in state else ("kavir" if "KAVIR" in state else None)
-            await self.bot.send_message(chat_id, "⏳ <b>در حال بررسی کد تایید در سرور...</b>")
+            await self.bot.send_message(chat_id, "⏳ <b>در حال بررسی کد تایید در سرور رسمی کارخانه...</b>")
             verify_res = await self.sniper.verify_real_otp(chat_id, text.strip(), portal_override=otp_portal)
             if verify_res.get("ok"):
                 await set_state(chat_id, "IDLE")
-                await self.bot.send_message(chat_id, verify_res.get("message", "✅ تایید شد"), reply_markup=self.get_main_keyboard(await get_user(chat_id)))
+                await self.bot.send_message(chat_id, verify_res.get("message", "✅ ورود با موفقیت تایید شد!"), reply_markup=self.get_main_keyboard(await get_user(chat_id)))
             else:
                 cancel_kb = {"inline_keyboard": [[{"text": "🏠 انصراف و منوی اصلی", "callback_data": "main_menu"}]]}
-                await self.bot.send_message(chat_id, f"{verify_res.get('message')}\nکد صحیح را دوباره بفرستید:", reply_markup=cancel_kb)
+                await self.bot.send_message(chat_id, f"❌ {verify_res.get('message')}\nلطفاً کد صحیح پیامک‌شده را دوباره بفرستید:", reply_markup=cancel_kb)
 
         elif state == "AWAIT_MARKET_SIZE":
             norm = normalize_tire_size(text)
@@ -871,18 +1198,51 @@ class BaleBotHandlers:
                 await set_state(chat_id, "IDLE")
                 await self._send_market_price_report(chat_id, norm)
             else:
+                car_k = detect_car_from_text(text, CAR_TIRE_CATALOG)
+                if car_k:
+                    await set_state(chat_id, "IDLE")
+                    await self._send_car_recommendation(chat_id, car_k)
+                    return
                 cancel_kb = {"inline_keyboard": [[{"text": "🔙 بازگشت به لیست سایزها", "callback_data": "menu_market_price"}]]}
-                await self.bot.send_message(chat_id, "❌ فرمت سایز درست نیست! مثال: <code>185/65R14</code> یا <code>205/60/15</code>", reply_markup=cancel_kb)
+                await self.bot.send_message(
+                    chat_id,
+                    "❌ <b>فرمت سایز تایر درست نیست!</b>\n📌 لطفاً سایز (مثل <code>185/65R14</code>) یا نام خودرو (مثل <code>پژو ۲۰۶</code>) را بفرستید:",
+                    reply_markup=cancel_kb,
+                )
 
         else:
-            # هوشمندی: اگر کاربر بدون رفتن به منو مستقیم سایز لاستیک (مثلاً 185/65R14) بفرستد، همان لحظه قیمت روز را استعلام می‌گیرد!
+            # ۱. تشخیص مستقیم سایز تایر (مثل 185/65R14 یا ۱۸۵/۶۵/۱۴)
             detected_size = normalize_tire_size(text)
             if detected_size:
                 await self._send_market_price_report(chat_id, detected_size)
                 return
 
+            # ۲. تشخیص هوشمند نام خودرو (مثل پژو ۲۰۶، پراید، دنا، کوییک، کامیون و...)
+            detected_car = detect_car_from_text(text, CAR_TIRE_CATALOG)
+            if detected_car:
+                await self._send_car_recommendation(chat_id, detected_car)
+                return
+
+            # ۳. درک هوشمند کلمات کلیدی فارسی پرکاربرد
+            low = text.lower()
+            if any(k in low for k in ("موجودی", "انبار", "دولتی")):
+                await self._route_callback(chat_id, None, "live_check_stock")
+                return
+            if any(k in low for k in ("مقایسه", "سود", "اختلاف")):
+                await self._route_callback(chat_id, None, "compare_gov_market")
+                return
+            if any(k in low for k in ("شکارچی", "خودکار", "اسنایپر")):
+                await self._route_callback(chat_id, None, "menu_sniper")
+                return
+            if any(k in low for k in ("قیمت", "آزاد", "نرخ")):
+                await self._route_callback(chat_id, None, "menu_market_price")
+                return
+            if any(k in low for k in ("راهنما", "کمک", "چجوری", "چطوری")):
+                await self._route_callback(chat_id, None, "menu_guide")
+                return
+
             await self.bot.send_message(
                 chat_id=chat_id,
-                text="👇 لطفاً از منوی زیر گزینه دلخواه خود را انتخاب کنید (یا مستقیم سایز تایر مثل <code>185/65R14</code> را بفرستید):",
+                text="👇 لطفاً از منوی زیر انتخاب کنید — یا خیلی راحت <b>نام خودرو</b> (مثل <code>دنا</code>) یا <b>سایز تایر</b> (مثل <code>185/65R14</code>) را تایپ کنید:",
                 reply_markup=self.get_main_keyboard(user),
             )

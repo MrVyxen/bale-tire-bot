@@ -8,6 +8,12 @@ BASE_DIR = Path(__file__).resolve().parent
 BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "867906633:IcjuDU147iZrdlKq9kRfNbCD_edEginX3_U")
 BALE_BASE_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
+# تنظیمات پشتیبانی و مدیر ربات
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1596059322"))
+SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@tairbot_support")
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "۰۹۱۲۰۰۰۰۰۰۰")
+SUPPORT_HOURS = os.getenv("SUPPORT_HOURS", "همه‌روزه ۰۸:۰۰ الی ۲۲:۰۰")
+
 # پایگاه داده
 DB_PATH = BASE_DIR / "tire_bot.db"
 

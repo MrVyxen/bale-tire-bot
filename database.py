@@ -54,6 +54,20 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    username TEXT,
+                    national_id TEXT,
+                    mobile TEXT,
+                    message TEXT NOT NULL,
+                    reply TEXT,
+                    status TEXT DEFAULT 'OPEN',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    replied_at TIMESTAMP
+                )
+            """)
             async with db.execute("PRAGMA user_version") as cur:
                 ver_row = await cur.fetchone()
                 schema_ver = ver_row[0] if ver_row else 0
@@ -172,6 +186,73 @@ async def get_previous_market_snapshot(tire_size: str) -> Optional[Dict[str, Any
     except Exception:
         pass
     return None
+
+
+async def create_support_ticket(
+    chat_id: int, username: str, national_id: str, mobile: str, message: str
+) -> int:
+    """ثبت پیام یا تیکت جدید کاربر برای پشتیبانی"""
+    async with _db_lock:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO support_tickets (chat_id, username, national_id, mobile, message, status)
+                VALUES (?, ?, ?, ?, ?, 'OPEN')
+                """,
+                (chat_id, username or "", national_id or "", mobile or "", message),
+            )
+            ticket_id = cursor.lastrowid
+            await db.commit()
+            return ticket_id
+
+
+async def get_user_tickets(chat_id: int, limit: int = 5) -> list[Dict[str, Any]]:
+    """لیست آخرین پیام‌های ارسالی کاربر به پشتیبانی"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT id, message, reply, status, created_at, replied_at
+                FROM support_tickets
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+async def get_ticket(ticket_id: int) -> Optional[Dict[str, Any]]:
+    """دریافت اطلاعات یک تیکت بر اساس شناسه"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def reply_support_ticket(ticket_id: int, reply_text: str) -> bool:
+    """ثبت پاسخ ادمین روی تیکت"""
+    async with _db_lock:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                UPDATE support_tickets
+                SET reply = ?, status = 'ANSWERED', replied_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (reply_text, ticket_id),
+            )
+            await db.commit()
+            return True
 
 
 async def get_analytics_summary() -> Dict[str, Any]:

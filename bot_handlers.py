@@ -3,7 +3,17 @@ import html
 import re
 import logging
 from typing import Dict, Any, Optional, List
-from database import get_user, upsert_user, set_state, log_action, get_previous_market_snapshot
+from database import (
+    get_user,
+    upsert_user,
+    set_state,
+    log_action,
+    get_previous_market_snapshot,
+    create_support_ticket,
+    get_user_tickets,
+    get_ticket,
+    reply_support_ticket,
+)
 from bale_api import BaleBotClient
 from config import (
     PORTALS,
@@ -13,6 +23,10 @@ from config import (
     CAR_TIRE_CATALOG,
     OIL_GRADES,
     OIL_CATEGORIES,
+    ADMIN_CHAT_ID,
+    SUPPORT_HANDLE,
+    SUPPORT_PHONE,
+    SUPPORT_HOURS,
 )
 from tire_api.oil_price_client import normalize_oil_grade
 from tire_api.sniper_engine import SniperEngine
@@ -94,7 +108,8 @@ class BaleBotHandlers:
                     {"text": "📋 وضعیت و پروفایل من", "callback_data": "view_profile"},
                 ],
                 [
-                    {"text": "📖 راهنمای جامع خرید تایر و روغن", "callback_data": "menu_guide"},
+                    {"text": "📖 راهنمای جامع خرید", "callback_data": "menu_guide"},
+                    {"text": "🎧 پشتیبانی و ارتباط با ما", "callback_data": "menu_support"},
                 ],
             ]
         }
@@ -612,7 +627,8 @@ class BaleBotHandlers:
         # با زدن هر دکمه منو یا بازگشت، وضعیت انتظار تایپ قبلی به‌صورت خودکار پاک می‌شود
         if user.get("state", "IDLE") != "IDLE" and not (
             data.startswith("edit_")
-            or data in ("ask_custom_market_size", "ask_custom_oil_grade")
+            or data in ("ask_custom_market_size", "ask_custom_oil_grade", "ask_support_msg")
+            or data.startswith("admin_reply_")
             or data.startswith("otp_send_")
         ):
             await set_state(chat_id, "IDLE")
@@ -1357,6 +1373,122 @@ class BaleBotHandlers:
             }
             await self._safe_edit(chat_id, message_id, guide_text, reply_markup=kb)
 
+        elif data == "menu_support":
+            text = (
+                "🎧 <b>مرکز پشتیبانی و ارتباط با مدیریت</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "سلام و احترام! تیم پشتیبانی تایر و روغن در خدمت شماست.\n"
+                "اگر هرگونه سوال درباره <b>ثبت‌نام لاستیک دولتی</b>، <b>ساعات شارژ سایت‌ها</b>، <b>استعلام روغن موتور</b> یا <b>پیشنهاد و انتقاد</b> دارید، ما اینجاییم تا راهنماییتان کنیم.\n\n"
+                "📞 <b>اطلاعات تماس مستقیم:</b>\n"
+                f"▫️ <b>آیدی پشتیبان در بله:</b> <code>{escape_html(SUPPORT_HANDLE)}</code>\n"
+                f"▫️ <b>شماره تماس پشتیبانی:</b> <code>{escape_html(SUPPORT_PHONE)}</code>\n"
+                f"▫️ <b>ساعت پاسخ‌گویی:</b> <i>{escape_html(SUPPORT_HOURS)}</i>\n\n"
+                "✍️ <b>ارسال پیام مستقیم داخل ربات:</b>\n"
+                "روی دکمه «✍️ ارسال پیام به پشتیبانی» بزنید تا پیامتان مستقیماً برای مدیر ارسال شود و پاسخ آن را همین‌جا در ربات دریافت کنید!"
+            )
+            kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✍️ ارسال پیام به پشتیبانی", "callback_data": "ask_support_msg"},
+                        {"text": "📋 پیگیری پیام‌های من", "callback_data": "my_support_tickets"},
+                    ],
+                    [
+                        {"text": f"💬 پیام به {SUPPORT_HANDLE}", "callback_data": "support_contacts"},
+                        {"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"},
+                    ],
+                ]
+            }
+            await self._safe_edit(chat_id, message_id, text, reply_markup=kb)
+
+        elif data == "support_contacts":
+            text = (
+                "📞 <b>راه‌های ارتباط مستقیم با پشتیبانی</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"💬 <b>پیام مستقیم در بله:</b> <code>{escape_html(SUPPORT_HANDLE)}</code>\n"
+                f"📱 <b>شماره تماس:</b> <code>{escape_html(SUPPORT_PHONE)}</code>\n"
+                f"⏰ <b>ساعت کاری:</b> <i>{escape_html(SUPPORT_HOURS)}</i>\n\n"
+                "💡 <i>همچنین می‌توانید بدون خروج از ربات، با زدن دکمه زیر پیام خود را بفرستید تا سریع پاسخ داده شود.</i>"
+            )
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "✍️ ارسال پیام در ربات", "callback_data": "ask_support_msg"}],
+                    [
+                        {"text": "🔙 بخش پشتیبانی", "callback_data": "menu_support"},
+                        {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    ],
+                ]
+            }
+            await self._safe_edit(chat_id, message_id, text, reply_markup=kb)
+
+        elif data == "ask_support_msg":
+            await set_state(chat_id, "AWAIT_SUPPORT_MSG")
+            kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_support"}]]}
+            await self._safe_edit(
+                chat_id,
+                message_id,
+                (
+                    "✍️ <b>ارسال پیام به پشتیبانی</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "لطفاً سوال، پیام یا مشکل خود را به صورت یک پیام متنی بنویسید و ارسال کنید.\n"
+                    "پیام شما مستقیماً به مدیر تحویل داده می‌شود و پاسخ آن در همین چت برایتان فرستاده خواهد شد."
+                ),
+                reply_markup=kb,
+            )
+
+        elif data == "my_support_tickets":
+            tickets = await get_user_tickets(chat_id, limit=5)
+            lines = [
+                "📋 <b>سوابق پیام‌های شما به پشتیبانی</b>",
+                "━━━━━━━━━━━━━━━━━━━━\n",
+            ]
+            if not tickets:
+                lines.append("📭 <i>شما هنوز هیچ پیامی به پشتیبانی ارسال نکرده‌اید.</i>\n\nبرای ثبت سوال یا پیام جدید، روی دکمه «✍️ ارسال پیام» بزنید.")
+            else:
+                for idx, t in enumerate(tickets, 1):
+                    st = "✅ پاسخ داده شد" if t.get("status") == "ANSWERED" else "⏳ در انتظار بررسی پشتیبان"
+                    created = (t.get("created_at") or "")[:16]
+                    msg_preview = escape_html(t.get("message", "")[:90])
+                    lines.append(f"<b>تیکت #{t['id']}</b> ({st}) • <i>{created}</i>")
+                    lines.append(f"📝 <b>پیام شما:</b> {msg_preview}")
+                    if t.get("reply"):
+                        lines.append(f"💬 <b>پاسخ مدیر:</b> {escape_html(t['reply'])}")
+                    lines.append("────────────────────")
+
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "✍️ ارسال پیام جدید", "callback_data": "ask_support_msg"}],
+                    [
+                        {"text": "🔙 بخش پشتیبانی", "callback_data": "menu_support"},
+                        {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    ],
+                ]
+            }
+            await self._safe_edit(chat_id, message_id, "\n".join(lines), reply_markup=kb)
+
+        elif data.startswith("admin_reply_"):
+            ticket_id_str = data.replace("admin_reply_", "")
+            try:
+                t_id = int(ticket_id_str)
+                ticket = await get_ticket(t_id)
+                if not ticket:
+                    await self._safe_edit(chat_id, message_id, "❌ تیکت مورد نظر یافت نشد.")
+                    return
+                await set_state(chat_id, f"AWAIT_ADMIN_REPLY_{t_id}")
+                kb = {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "main_menu"}]]}
+                await self._safe_edit(
+                    chat_id,
+                    message_id,
+                    (
+                        f"✍️ <b>پاسخ به تیکت #{t_id}</b>\n"
+                        f"👤 <b>کاربر:</b> <code>{ticket.get('chat_id')}</code> (@{ticket.get('username') or 'بدون نام'})\n"
+                        f"📝 <b>پیام کاربر:</b>\n<i>{escape_html(ticket.get('message', ''))}</i>\n\n"
+                        "👇 لطفاً متن پاسخ خود را بفرستید تا فوراً برای کاربر ارسال شود:"
+                    ),
+                    reply_markup=kb,
+                )
+            except Exception as e:
+                logger.error(f"admin_reply error: {e}")
+
     async def handle_text_message(self, message: Dict[str, Any]):
         chat_id = message.get("chat", {}).get("id")
         text = persian_to_english_digits(message.get("text", "").strip())
@@ -1392,8 +1524,10 @@ class BaleBotHandlers:
                 await self._route_callback(chat_id, None, "menu_car_picker")
             elif cmd == "/compare":
                 await self._route_callback(chat_id, None, "compare_gov_market")
-            elif cmd == "/help":
+            elif cmd in ("/help", "/guide"):
                 await self._route_callback(chat_id, None, "menu_guide")
+            elif cmd in ("/support", "/ticket", "/contact"):
+                await self._route_callback(chat_id, None, "menu_support")
             else:
                 await self.handle_start(chat_id, username)
             return
@@ -1508,6 +1642,96 @@ class BaleBotHandlers:
                     reply_markup=cancel_kb,
                 )
 
+        elif state == "AWAIT_SUPPORT_MSG":
+            msg_text = message.get("text", "").strip()
+            if not msg_text or len(msg_text) < 3:
+                cancel_kb = {"inline_keyboard": [[{"text": "🔙 انصراف و بازگشت", "callback_data": "menu_support"}]]}
+                await self.bot.send_message(chat_id, "❌ لطفاً پیام خود را کامل‌تر بنویسید (حداقل ۳ حرف):", reply_markup=cancel_kb)
+                return
+
+            await set_state(chat_id, "IDLE")
+            nat_id = user.get("national_id", "")
+            mobile = user.get("mobile", "")
+            t_id = await create_support_ticket(chat_id, username, nat_id, mobile, msg_text)
+            now_fa = get_tehran_now()["compact_fa"]
+
+            user_ack_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📋 پیگیری پیام‌های من", "callback_data": "my_support_tickets"},
+                        {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                    ]
+                ]
+            }
+            await self.bot.send_message(
+                chat_id,
+                (
+                    f"✅ <b>پیام شما با موفقیت برای پشتیبانی ارسال شد!</b>\n"
+                    f"🔖 <b>شماره تیکت شما:</b> <code>#{t_id}</code>\n"
+                    f"🕒 <b>زمان ثبت:</b> <i>{now_fa}</i>\n\n"
+                    "تیم پشتیبانی در اولین فرصت پیام شما را بررسی می‌کند و پاسخ آن مستقیم همین‌جا در ربات برایتان فرستاده خواهد شد."
+                ),
+                reply_markup=user_ack_kb,
+            )
+
+            # ارسال فوری نوتیفیکیشن به مدیر برای پاسخ مستقیم
+            if ADMIN_CHAT_ID:
+                admin_kb = {
+                    "inline_keyboard": [
+                        [{"text": f"✍️ پاسخ مستقیم به این پیام (#{t_id})", "callback_data": f"admin_reply_{t_id}"}]
+                    ]
+                }
+                user_id_line = f"@{username}" if username else "بدون نام کاربری"
+                admin_notif = (
+                    f"📩 <b>پیام جدید پشتیبانی (تیکت #{t_id})</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>فرستنده:</b> {user_id_line} (<code>{chat_id}</code>)\n"
+                    f"🆔 <b>کد ملی:</b> <code>{nat_id or 'ثبت نشده'}</code>\n"
+                    f"📱 <b>موبایل:</b> <code>{mobile or 'ثبت نشده'}</code>\n"
+                    f"🕒 <b>زمان:</b> {now_fa}\n\n"
+                    f"📝 <b>متن پیام کاربر:</b>\n{escape_html(msg_text)}"
+                )
+                try:
+                    await self.bot.send_message(ADMIN_CHAT_ID, admin_notif, reply_markup=admin_kb)
+                except Exception as e:
+                    logger.warning(f"Failed to forward ticket #{t_id} to admin: {e}")
+
+        elif state.startswith("AWAIT_ADMIN_REPLY_"):
+            ticket_id_str = state.replace("AWAIT_ADMIN_REPLY_", "")
+            reply_text = message.get("text", "").strip()
+            await set_state(chat_id, "IDLE")
+            try:
+                t_id = int(ticket_id_str)
+                ticket = await get_ticket(t_id)
+                if ticket:
+                    target_chat_id = ticket["chat_id"]
+                    await reply_support_ticket(t_id, reply_text)
+                    now_fa = get_tehran_now()["compact_fa"]
+                    user_notif = (
+                        f"💬 <b>پاسخ پشتیبانی به پیام شما (تیکت #{t_id}):</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📝 <b>پیام شما:</b>\n<i>{escape_html(ticket.get('message', ''))}</i>\n\n"
+                        f"✅ <b>پاسخ مدیر پشتیبانی:</b>\n{escape_html(reply_text)}\n\n"
+                        f"🕒 <i>{now_fa}</i>"
+                    )
+                    user_kb = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "✍️ ارسال پیام جدید", "callback_data": "ask_support_msg"},
+                                {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+                            ]
+                        ]
+                    }
+                    try:
+                        await self.bot.send_message(target_chat_id, user_notif, reply_markup=user_kb)
+                        await self.bot.send_message(chat_id, f"✅ پاسخ شما با موفقیت برای کاربر <code>{target_chat_id}</code> فرستاده شد.")
+                    except Exception as e:
+                        await self.bot.send_message(chat_id, f"⚠️ پاسخ ذخیره شد ولی ارسال پیام به کاربر خطا داد: {e}")
+                else:
+                    await self.bot.send_message(chat_id, "❌ تیکت یافت نشد.")
+            except Exception as e:
+                await self.bot.send_message(chat_id, f"❌ خطا در ثبت پاسخ: {e}")
+
         else:
             # ۱. تشخیص مستقیم سایز تایر (مثل 185/65R14 یا ۱۸۵/۶۵/۱۴)
             detected_size = normalize_tire_size(text)
@@ -1556,6 +1780,9 @@ class BaleBotHandlers:
                 return
             if any(k in low for k in ("قیمت", "آزاد", "نرخ")):
                 await self._route_callback(chat_id, None, "menu_market_price")
+                return
+            if any(k in low for k in ("پشتیبان", "پشتیبانی", "تیکت", "تماس", "ارتباط", "مدیر", "ادمین")):
+                await self._route_callback(chat_id, None, "menu_support")
                 return
             if any(k in low for k in ("راهنما", "کمک", "چجوری", "چطوری")):
                 await self._route_callback(chat_id, None, "menu_guide")

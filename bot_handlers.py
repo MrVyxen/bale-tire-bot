@@ -5,7 +5,15 @@ import logging
 from typing import Dict, Any, Optional, List
 from database import get_user, upsert_user, set_state, log_action, get_previous_market_snapshot
 from bale_api import BaleBotClient
-from config import PORTALS, CAR_HINT_FOR_SIZE, MARKET_TIRE_SIZES, CAR_TIRE_CATALOG, OIL_GRADES
+from config import (
+    PORTALS,
+    CAR_HINT_FOR_SIZE,
+    MARKET_TIRE_SIZES,
+    TIRE_SIZE_CATEGORIES,
+    CAR_TIRE_CATALOG,
+    OIL_GRADES,
+    OIL_CATEGORIES,
+)
 from tire_api.oil_price_client import normalize_oil_grade
 from tire_api.sniper_engine import SniperEngine
 from tire_api.utils import (
@@ -150,18 +158,19 @@ class BaleBotHandlers:
         std_key = size_to_key(std_sz)
         wide_key = size_to_key(wide_sz)
         oil_grade = car.get("oil_grade", "10W40")
+        gear_oil = car.get("gear_oil", "75W80")
         oil_note = car.get("oil_note", oil_grade)
 
         text = (
-            f"🚘 <b>راهنمای کامل تایر و روغن موتور {escape_html(car['name'])}</b>\n"
+            f"🚘 <b>راهنمای کامل تایر و روغن‌های {escape_html(car['name'])}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"⭐ <b>سایز تایر استاندارد (فابریک):</b> <code>{std_sz}</code>\n"
             "   └ <i>بهترین انتخاب برای مصرف سوخت، نرمی فرمان و سهمیه دولتی</i>\n\n"
             f"🔥 <b>سایز تایر جایگزین / پهن‌تر:</b> <code>{wide_sz}</code>\n"
-            "   └ <i>تعادل بیشتر در پیچ‌ها و نمای اسپرت‌تر</i>\n\n"
-            f"🛢 <b>روغن موتور پیشنهادی:</b> <code>{escape_html(oil_grade)}</code>\n"
+            "   └ <i>تعادل بیشتر در پیچ‌ها و کاربری متناسب با رینگ</i>\n\n"
+            f"🛢 <b>روغن موتور و گیربکس پیشنهادی:</b>\n"
             f"   └ <i>{escape_html(oil_note)}</i>\n\n"
-            "👇 با یک کلیک قیمت روز بگیرید، روغن بخرید یا برای شکارچی ثبت کنید:"
+            "👇 با یک کلیک قیمت روز بگیرید، آنلاین بخرید یا برای شکارچی ثبت کنید:"
         )
         kb = {
             "inline_keyboard": [
@@ -174,8 +183,11 @@ class BaleBotHandlers:
                     {"text": f"🎯 شکارچی ({wide_sz})", "callback_data": f"set_size_{wide_key}"},
                 ],
                 [
-                    {"text": f"🛢 خرید و قیمت روغن ({oil_grade})", "callback_data": f"oil_{oil_grade}"},
-                    {"text": f"⚖️ دولتی و آزاد ({std_sz})", "callback_data": f"cmp_{std_key}"},
+                    {"text": f"🛢 روغن موتور ({oil_grade})", "callback_data": f"oil_{oil_grade}"},
+                    {"text": f"⚙️ روغن گیربکس ({gear_oil})", "callback_data": f"oil_{gear_oil}"},
+                ],
+                [
+                    {"text": f"⚖️ مقایسه دولتی و آزاد ({std_sz})", "callback_data": f"cmp_{std_key}"},
                 ],
                 [
                     {"text": "🚘 انتخاب خودروی دیگر", "callback_data": "menu_car_picker"},
@@ -193,11 +205,11 @@ class BaleBotHandlers:
     ):
         grade = normalize_oil_grade(raw_grade) or raw_grade.upper()
         loading_txt = (
-            f"🛢 <b>در حال استعلام زنده قیمت و خرید روغن موتور <code>{escape_html(grade)}</code>...</b>\n"
+            f"🛢 <b>در حال استعلام زنده قیمت و لینک خرید <code>{escape_html(grade)}</code>...</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "🌐 اتصال هم‌زمان به فروشگاه‌های معتبر:\n"
             "▫️ <b>دیجی‌کالا</b> • <b>ترب</b> • <b>باسلام</b>\n\n"
-            "⏳ <i>در حال حذف روغن‌های موتورسیکلت و فیلتر و استخراج ارزان‌ترین گالن‌ها...</i>"
+            "⏳ <i>در حال تفکیک دقیق برندهای ایرانی و خارجی و یافتن ارزان‌ترین گزینه‌های اصل...</i>"
         )
         if edit_msg_id:
             await self._safe_edit(chat_id, edit_msg_id, loading_txt)
@@ -209,7 +221,7 @@ class BaleBotHandlers:
             "inline_keyboard": [
                 [
                     {"text": "🔄 بروزرسانی همین لحظه", "callback_data": f"oilrefresh_{grade}"},
-                    {"text": "🛢 گرانروی دیگر", "callback_data": "menu_oil_price"},
+                    {"text": "🛢 دسته‌بندی انواع روغن", "callback_data": "menu_oil_price"},
                 ],
                 [
                     {"text": "🚘 انتخاب با نام خودرو", "callback_data": "menu_car_picker"},
@@ -220,9 +232,9 @@ class BaleBotHandlers:
 
         if not report.get("ok") or report.get("total_found", 0) == 0:
             fail_txt = (
-                f"⚠️ <b>نتیجه دقیقی برای روغن موتور <code>{escape_html(grade)}</code> پیدا نشد!</b>\n"
+                f"⚠️ <b>نتیجه دقیقی برای <code>{escape_html(grade)}</code> پیدا نشد!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "💡 لطفاً گرانروی را درست وارد کنید (مثلاً <code>10W40</code>، <code>20W50</code>، <code>5W30</code> یا <code>15W40</code>) و دوباره امتحان کنید."
+                "💡 لطفاً از منوی دسته‌بندی انواع روغن انتخاب کنید یا کد صحیح (مثل <code>10W40</code>، <code>75W80</code>، <code>CVT</code>، <code>DOT4</code>) را بفرستید."
             )
             if edit_msg_id:
                 await self._safe_edit(chat_id, edit_msg_id, fail_txt, reply_markup=kb)
@@ -243,15 +255,13 @@ class BaleBotHandlers:
                 src_parts.append(f"{s_name} ({cnt})")
         src_line = " | ".join(src_parts)
 
-        grade_hint = next((desc for g, desc, _ in OIL_GRADES if g == report["grade"]), "")
-        hint_line = f"🚘 <b>مناسب خودروهای:</b> {escape_html(grade_hint)}\n" if grade_hint else ""
-
+        title_fa = report.get("title_fa") or f"روغن موتور {report['grade']}"
         lines: List[str] = [
-            f"🛢 <b>قیمت روز و خرید آنلاین روغن موتور <code>{escape_html(report['grade'])}</code></b>",
-            f"📦 <b>بسته‌بندی:</b> {escape_html(report['target_volume_label'])}",
+            f"🛢 <b>قیمت روز و خرید آنلاین • {escape_html(title_fa)}</b>",
+            f"📦 <b>حجم/بسته‌بندی:</b> {escape_html(report['target_volume_label'])}",
             f"🕒 <b>ساعت استعلام:</b> {ts['full_fa']}",
             f"📡 <b>منابع بررسی‌شده:</b> {src_line}",
-            hint_line + "━━━━━━━━━━━━━━━━━━━━\n",
+            "━━━━━━━━━━━━━━━━━━━━\n",
         ]
 
         ir_sum = report.get("ir_summary")
@@ -759,31 +769,62 @@ class BaleBotHandlers:
 
         elif data == "menu_oil_price":
             rows: List[List[Dict[str, str]]] = []
-            for i in range(0, len(OIL_GRADES), 2):
+            cat_items = list(OIL_CATEGORIES.items())
+            for i in range(0, len(cat_items), 2):
                 pair = []
-                for gr, desc, vol_tag in OIL_GRADES[i : i + 2]:
-                    short_desc = desc.split("،")[0]
-                    icon = "🚛" if gr == "15W40" else "🛢"
-                    pair.append({"text": f"{icon} {gr} • {short_desc}", "callback_data": f"oil_{gr}"})
+                for ck, info in cat_items[i : i + 2]:
+                    pair.append({"text": info["short"], "callback_data": f"oilcat_{ck}"})
                 rows.append(pair)
             rows.append([
-                {"text": "🚘 انتخاب روغن با نام خودرو", "callback_data": "menu_car_picker"},
-                {"text": "✍️ تایپ گرانروی دلخواه", "callback_data": "ask_custom_oil_grade"},
+                {"text": "🚘 انتخاب با نام خودرو", "callback_data": "menu_car_picker"},
+                {"text": "✍️ تایپ کد یا گرانروی", "callback_data": "ask_custom_oil_grade"},
             ])
             rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
 
             now_fa = get_tehran_now()["full_fa"]
             text = (
-                "🛢 <b>خرید آنلاین و قیمت روز روغن موتور خودرو</b>\n"
+                "🛢 <b>خرید آنلاین و قیمت روز تمامی انواع روغن خودرو</b>\n"
                 f"🕒 <i>{now_fa}</i>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "🌐 ربات هم‌زمان به <b>دیجی‌کالا، ترب و باسلام</b> وصل می‌شود و ارزان‌ترین گالن‌های اصل (بهران، ایرانول، اسپیدی، پارس، کاسترول، لیکومولی و...) را همراه با <b>لینک خرید مستقیم</b> می‌آورد!\n\n"
-                "📌 <b>راهنمای سریع گرانروی:</b>\n"
-                "▫️ <code>10W40</code>: پژو، سمند، دنا، کوییک، ساینا، تیبا\n"
-                "▫️ <code>20W50</code>: پراید، پیکان و موتورهای قدیمی‌تر\n"
-                "▫️ <code>5W30</code> / <code>5W40</code>: تارا، شاهین، ۲۰۷، توربو و وارداتی\n"
-                "▫️ <code>15W40</code>: روغن دیزلی ۲۰ لیتری کامیون و کشنده\n\n"
-                "👇 گرانروی مورد نظرتان را انتخاب کنید:"
+                "🌐 اتصال زنده به <b>دیجی‌کالا، ترب و باسلام</b> برای بیش از <b>۲۹ نوع و گرانروی مختلف</b>:\n"
+                "▫️ <b>روغن موتور بنزینی</b> (0W20 تا 20W50)\n"
+                "▫️ <b>روغن موتور دیزلی</b> (کامیون، کشنده، خاور ۲۰ لیتری)\n"
+                "▫️ <b>واسکازین و گیربکس دنده‌ای</b> (75W80 تا 85W140)\n"
+                "▫️ <b>گیربکس اتوماتیک</b> (ATF، CVT و DCT دوکلاچه)\n"
+                "▫️ <b>هیدرولیک فرمان، ترمز DOT3/DOT4 و ضدیخ</b>\n"
+                "▫️ <b>روغن موتورسیکلت و اسکوتر</b>\n\n"
+                "👇 دسته‌بندی مورد نظرتان را انتخاب کنید:"
+            )
+            await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+
+        elif data.startswith("oilcat_"):
+            ck = data.replace("oilcat_", "")
+            cat = OIL_CATEGORIES.get(ck)
+            if not cat:
+                await self._route_callback(chat_id, message_id, "menu_oil_price")
+                return
+            rows = []
+            items = cat["items"]
+            # اگر عنوان کوتاه است ۲ ستونی، وگرنه تک‌ستونی خوانا
+            if len(items) >= 6:
+                for i in range(0, len(items), 2):
+                    pair = []
+                    for code, hint in items[i : i + 2]:
+                        short_h = hint.split("/")[0].strip()
+                        pair.append({"text": f"🛢 {code} • {short_h}", "callback_data": f"oil_{code}"})
+                    rows.append(pair)
+            else:
+                for code, hint in items:
+                    rows.append([{"text": f"🛢 {code}  •  {hint}", "callback_data": f"oil_{code}"}])
+            rows.append([
+                {"text": "🔙 بازگشت به دسته‌های روغن", "callback_data": "menu_oil_price"},
+                {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+            ])
+            text = (
+                f"<b>{escape_html(cat['title'])}</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"ℹ️ <i>{escape_html(cat['desc'])}</i>\n\n"
+                "👇 مدل یا گرانروی دقیق را انتخاب کنید تا ارزان‌ترین قیمت روز و لینک خرید مستقیم را بگیرید:"
             )
             await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
@@ -794,9 +835,10 @@ class BaleBotHandlers:
                 chat_id,
                 message_id,
                 (
-                    "✍️ <b>تایپ گرانروی روغن موتور یا نام خودرو</b>\n"
+                    "✍️ <b>تایپ نوع روغن، گرانروی یا نام خودرو</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "گرانروی روغن موتور (مثل <code>10W40</code>، <code>5W30</code>، <code>20W50</code>، <code>15W40</code>) یا نام خودروی خود (مثل <code>پژو ۲۰۶</code>) را بفرستید:"
+                    "هر نوع روغنی که می‌خواهید تایپ کنید:\n"
+                    "📌 <i>مثال‌ها:</i> <code>10W40</code> • <code>5W30</code> • <code>75W80</code> • <code>CVT</code> • <code>DCT</code> • <code>DOT4</code> • <code>هیدرولیک</code> • <code>ضدیخ</code> • <code>پژو ۲۰۶</code>"
                 ),
                 reply_markup=kb,
             )
@@ -956,21 +998,55 @@ class BaleBotHandlers:
 
         elif data == "menu_market_price":
             rows: List[List[Dict[str, str]]] = []
-            for i in range(0, len(MARKET_TIRE_SIZES), 2):
+            # ۸ دسته‌بندی کامل تمام سایزهای تایر (از رینگ ۱۳ تا ۲۰ + وانت/نیسان + کامیون/کشنده)
+            cat_items = list(TIRE_SIZE_CATEGORIES.items())
+            for i in range(0, len(cat_items), 2):
                 pair = []
-                for sz, car in MARKET_TIRE_SIZES[i : i + 2]:
-                    pair.append({"text": f"🛞 {sz} • {car}", "callback_data": f"mkt_{size_to_key(sz)}"})
+                for tk, info in cat_items[i : i + 2]:
+                    pair.append({"text": info["short"], "callback_data": f"tirecat_{tk}"})
                 rows.append(pair)
-            rows.append([{"text": "✍️ تایپ سایز دلخواه (مثلاً 225/55R19)", "callback_data": "ask_custom_market_size"}])
+            rows.append([
+                {"text": "🚘 انتخاب با نام خودرو", "callback_data": "menu_car_picker"},
+                {"text": "✍️ تایپ سایز دلخواه", "callback_data": "ask_custom_market_size"},
+            ])
             rows.append([{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "main_menu"}])
 
             now_fa = get_tehran_now()["full_fa"]
             text = (
-                "💰 <b>استعلام زنده قیمت روز لاستیک آزاد</b>\n"
+                "💰 <b>استعلام زنده قیمت روز تمامی سایزهای تایر آزاد</b>\n"
                 f"🕒 <i>{now_fa}</i>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "🌐 ربات هم‌زمان به <b>دیجی‌کالا، ترب، باسلام و هایپرتایر</b> وصل می‌شود، آگهی‌های متفرقه را حذف می‌کند و دقیق‌ترین نرخ همین ساعت را با تفکیک <b>تک‌حلقه</b> و <b>جفت</b> به شما نشان می‌دهد.\n\n"
-                "👇 سایز خودروی خود را انتخاب کنید یا دستی تایپ کنید:"
+                "🌐 اتصال هم‌زمان به <b>دیجی‌کالا، ترب، باسلام و هایپرتایر</b> برای بیش از <b>۶۰ سایز استاندارد و تخصصی</b>:\n"
+                "▫️ <b>سواری:</b> رینگ ۱۳، ۱۴، ۱۵ و ۱۶ (فابریک و پهن اسپرت)\n"
+                "▫️ <b>شاسی‌بلند و آفرود:</b> رینگ ۱۷، ۱۸، ۱۹ و ۲۰\n"
+                "▫️ <b>وانت و باری سبک:</b> نیسان (حتی <code>7.50R16</code>)، مزدا، آریسان، ون\n"
+                "▫️ <b>کامیون و کشنده:</b> ایسوزو، خاور، ولوو، اسکانیا، مایلر (<code>12.00R24</code>)\n\n"
+                "👇 رینگ یا کلاس خودروی خود را انتخاب کنید:"
+            )
+            await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+
+        elif data.startswith("tirecat_"):
+            tk = data.replace("tirecat_", "")
+            cat = TIRE_SIZE_CATEGORIES.get(tk)
+            if not cat:
+                await self._route_callback(chat_id, message_id, "menu_market_price")
+                return
+            rows = []
+            sz_list = cat["sizes"]
+            for i in range(0, len(sz_list), 2):
+                pair = []
+                for sz, car_lbl in sz_list[i : i + 2]:
+                    short_c = car_lbl.split("/")[0].strip()
+                    pair.append({"text": f"🛞 {sz} • {short_c}", "callback_data": f"mkt_{size_to_key(sz)}"})
+                rows.append(pair)
+            rows.append([
+                {"text": "🔙 بازگشت به دسته‌های تایر", "callback_data": "menu_market_price"},
+                {"text": "🏠 منوی اصلی", "callback_data": "main_menu"},
+            ])
+            text = (
+                f"<b>{escape_html(cat['title'])}</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "👇 سایز دقیق روی دیواره لاستیک را انتخاب کنید تا قیمت زنده همین ساعت را از فروشگاه‌های کشور بگیرید:"
             )
             await self._safe_edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
 
@@ -981,10 +1057,10 @@ class BaleBotHandlers:
                 chat_id,
                 message_id,
                 (
-                    "✍️ <b>تایپ سایز دلخواه برای استعلام قیمت روز</b>\n"
+                    "✍️ <b>تایپ سایز دلخواه تایر برای استعلام قیمت روز</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "سایز روی دیواره لاستیک خودروی خود را بفرستید:\n"
-                    "📌 <i>مثال‌ها:</i> <code>185/65R14</code> • <code>205/60/15</code> • <code>225/55R19</code>\n\n"
+                    "هر سایزی (سواری، شاسی‌بلند، وانت یا کامیون) را بفرستید:\n"
+                    "📌 <i>مثال‌ها:</i> <code>185/65R14</code> • <code>225/65R17</code> • <code>7.50R16</code> • <code>295/80R22.5</code> • <code>12.00R24</code>\n\n"
                     "💡 <i>حتی با اعداد فارسی هم بنویسید ربات هوشمندانه تشخیص می‌دهد!</i>"
                 ),
                 reply_markup=kb,
@@ -1445,21 +1521,28 @@ class BaleBotHandlers:
                 await self._send_oil_price_report(chat_id, detected_oil)
                 return
 
-            # ۳. اگر کاربر بنویسد «روغن پراید» یا «روغن ۲۰۶» مستقیم قیمت روغن همان خودرو را می‌گیرد
+            # ۳. اگر کاربر بنویسد «روغن پراید» یا «واسکازین ۲۰۶» مستقیم روغن مناسب همان خودرو را استعلام می‌گیرد
             low = text.lower()
             detected_car = detect_car_from_text(text, CAR_TIRE_CATALOG)
-            if "روغن" in low and detected_car:
+            if detected_car and any(k in low for k in ("گیربکس", "واسکازین", "دنده", "دیفرانسیل")):
+                g_oil = CAR_TIRE_CATALOG[detected_car].get("gear_oil", "75W80")
+                await self._send_oil_price_report(chat_id, g_oil)
+                return
+            if detected_car and "روغن" in low:
                 oil_g = CAR_TIRE_CATALOG[detected_car].get("oil_grade", "10W40")
                 await self._send_oil_price_report(chat_id, oil_g)
                 return
 
-            # ۴. تشخیص هوشمند نام خودرو (مثل پژو ۲۰۶، پراید، دنا، کوییک، کامیون و...)
+            # ۴. تشخیص هوشمند نام خودرو (مثل پژو ۲۰۶، پراید، دنا، نیسان، خاور، کامیون و...)
             if detected_car:
                 await self._send_car_recommendation(chat_id, detected_car)
                 return
 
             # ۵. درک هوشمند کلمات کلیدی فارسی پرکاربرد
-            if any(k in low for k in ("روغن", "موتور", "بهران", "ایرانول", "اسپیدی", "کاسترول")):
+            if any(k in low for k in ("واسکازین", "گیربکس", "دنده", "دیفرانسیل")):
+                await self._route_callback(chat_id, None, "oilcat_gear_manual")
+                return
+            if any(k in low for k in ("روغن", "بهران", "ایرانول", "اسپیدی", "کاسترول", "لیکومولی")):
                 await self._route_callback(chat_id, None, "menu_oil_price")
                 return
             if any(k in low for k in ("موجودی", "انبار", "دولتی")):

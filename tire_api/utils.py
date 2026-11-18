@@ -117,8 +117,9 @@ def clean_search_text(text: str) -> str:
 
 def parse_size_parts(raw: str) -> Optional[Tuple[str, str, str]]:
     """
-    استخراج دقیق سه‌گانه (عرض، فاق، رینگ) از رشته‌هایی مثل:
-    185/65R14 , 185_65_14 , 185-65-14 , 185 65 r14 , 295/80R22.5
+    استخراج دقیق سه‌گانه سایز تایر (متریک و اینچی باری/کامیونی):
+    - متریک: 185/65R14 , 185_65_14 , 295/80R22.5 -> ('185', '65', '14')
+    - اینچی باری/سنگین: 7.50R16 , 8.25-16 , 12.00R24 -> ('7.50', 'INCH', '16')
     """
     if not raw:
         return None
@@ -127,40 +128,55 @@ def parse_size_parts(raw: str) -> Optional[Tuple[str, str, str]]:
         r"(?<!\d)(\d{3})\s*[/_\-\s]\s*(\d{2})\s*[Rr/\-_\s]*\s*(\d{2}(?:\.\d)?)(?!\d)",
         s,
     )
-    if not m:
-        return None
-    w, a, r = m.group(1), m.group(2), m.group(3)
-    # بررسی منطقی بودن اعداد تایر سواری و سنگین
-    if not (135 <= int(w) <= 450 and 25 <= int(a) <= 95):
-        return None
-    try:
-        rim_f = float(r)
-        if not (10 <= rim_f <= 26):
-            return None
-    except ValueError:
-        return None
-    return w, a, r
+    if m:
+        w, a, r = m.group(1), m.group(2), m.group(3)
+        if 135 <= int(w) <= 450 and 25 <= int(a) <= 95:
+            try:
+                rim_f = float(r)
+                if 10 <= rim_f <= 26:
+                    return w, a, r
+            except ValueError:
+                pass
+
+    # الگوی سایزهای اینچی باری، نیسان، خاور و کامیون (مثل 7.50R16، 8.25R16، 12.00R24)
+    m_inch = re.search(
+        r"(?<!\d)(\d{1,2}\.\d{2})\s*(?:_?R_?|[Rr/\-\s]+)\s*(\d{2}(?:\.\d)?)(?!\d)",
+        s,
+    )
+    if m_inch:
+        w_in, r_in = m_inch.group(1), m_inch.group(2)
+        try:
+            wf, rf = float(w_in), float(r_in)
+            if 5.5 <= wf <= 14.5 and 12 <= rf <= 26:
+                return w_in, "INCH", r_in
+        except ValueError:
+            pass
+    return None
 
 
 def normalize_tire_size(raw: str) -> Optional[str]:
-    """تبدیل هر فرمت ورودی تایر به فرمت استاندارد 185/65R14"""
+    """تبدیل هر فرمت ورودی تایر به فرمت استاندارد 185/65R14 یا 7.50R16"""
     parts = parse_size_parts(raw)
     if not parts:
         return None
     w, a, r = parts
+    if a == "INCH":
+        return f"{w}R{r}"
     return f"{w}/{a}R{r}"
 
 
 def size_to_key(raw: str) -> str:
-    """تبدیل 185/65R14 به کلید دیتابیس مثل 185_65_14"""
+    """تبدیل 185/65R14 به 185_65_14 و 7.50R16 به 7.50_R_16"""
     parts = parse_size_parts(raw)
     if parts:
+        if parts[1] == "INCH":
+            return f"{parts[0]}_R_{parts[2]}"
         return f"{parts[0]}_{parts[1]}_{parts[2]}"
     return re.sub(r"[^0-9A-Za-z._]", "_", clean_search_text(raw))
 
 
 def key_to_size(key: str) -> str:
-    """تبدیل کلید دیتابیس 185_65_14 به 185/65R14"""
+    """تبدیل کلید دیتابیس 185_65_14 به 185/65R14 یا 7.50_R_16 به 7.50R16"""
     norm = normalize_tire_size(key)
     if norm:
         return norm
@@ -172,9 +188,16 @@ def key_to_size(key: str) -> str:
 def matches_exact_tire_size(text: str, width: str, aspect: str, rim: str) -> bool:
     """
     تطبیق سخت‌گیرانه سایز تایر در عنوان محصول برای جلوگیری از تداخل سایزهای مشابه
-    (مثلاً 185/65R14 هرگز با 185/65R15 یا 185/60R14 قاطی نمی‌شود)
+    پشتیبانی از هر دو فرمت متریک (185/65R14) و اینچی باری (7.50R16, 12.00R24)
     """
     t = clean_search_text(text).upper()
+    if aspect == "INCH":
+        w_esc = re.escape(width)
+        w_nodot = width.replace(".", "")
+        r_esc = re.escape(rim)
+        inch_pat = rf"(?<!\d)(?:{w_esc}|{w_nodot})\s*(?:[Rr/\-\s]*)\s*{r_esc}(?!\d)"
+        return bool(re.search(inch_pat, t))
+
     w, a, r = re.escape(width), re.escape(aspect), re.escape(rim)
 
     # 1. الگوی استاندارد: 185/65R14 یا 185/65 R 14 یا 185-65-14 یا 185 65 14

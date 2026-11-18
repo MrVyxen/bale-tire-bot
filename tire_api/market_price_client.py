@@ -195,7 +195,11 @@ class MarketPriceClient:
         offers: List[Dict[str, Any]] = []
         seen_ids = set()
 
-        queries = (norm_size, f"{w}/{a}R{r}", f"لاستیک {w}/{a}")
+        queries = (
+            (norm_size, f"{w}-{r}", f"لاستیک {w} {r}")
+            if a == "INCH"
+            else (norm_size, f"{w}/{a}R{r}", f"لاستیک {w}/{a}")
+        )
 
         async def _query(q: str):
             try:
@@ -252,10 +256,11 @@ class MarketPriceClient:
         offers: List[Dict[str, Any]] = []
         seen_ids = set()
 
-        queries = [
-            (f"لاستیک {norm_size}", 40),
-            (f"تایر {w} {a} {r}", 20),
-        ]
+        queries = (
+            [(f"لاستیک {norm_size}", 40), (f"لاستیک {w}-{r}", 20)]
+            if a == "INCH"
+            else [(f"لاستیک {norm_size}", 40), (f"تایر {w} {a} {r}", 20)]
+        )
 
         async def _query(q: str, sz: int):
             try:
@@ -330,7 +335,7 @@ class MarketPriceClient:
             return {"ok": False, "error": "سایز تایر نامعتبر است."}
 
         w, a, r = parts
-        norm_size = f"{w}/{a}R{r}"
+        norm_size = f"{w}R{r}" if a == "INCH" else f"{w}/{a}R{r}"
         now_info = get_tehran_now()
 
         if not force_refresh and norm_size in self._price_cache:

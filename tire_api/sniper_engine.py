@@ -13,6 +13,7 @@ from tire_api.kavir_client import KavirTireClient
 from tire_api.kala_ntsw_client import KalaNtswClient
 from tire_api.multi_portal_client import FactoryPortalClient
 from tire_api.market_price_client import MarketPriceClient
+from tire_api.oil_price_client import OilPriceClient
 from tire_api.utils import key_to_size, normalize_tire_size, parse_size_parts, size_to_key
 
 logger = logging.getLogger("SniperEngine")
@@ -30,6 +31,7 @@ class SniperEngine:
             for k in ("irantire", "yazd", "razi", "kian", "artawheel", "dena")
         }
         self.market_client = MarketPriceClient(self.hypertire_client)
+        self.oil_client = OilPriceClient()
         self.running_tasks: Dict[int, asyncio.Task] = {}
 
     async def close_all(self):
@@ -40,6 +42,7 @@ class SniperEngine:
             self.ntsw_client,
             *self.factory_clients.values(),
             self.market_client,
+            self.oil_client,
         ):
             try:
                 await client.close()

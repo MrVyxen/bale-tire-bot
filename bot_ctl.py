@@ -106,6 +106,7 @@ def check_wiring() -> int:
         "tire_api",
         "tire_api.sniper_engine",
         "tire_api.market_price_client",
+        "tire_api.oil_price_client",
         "bot_handlers",
         "main",
         "monitor_realtime",

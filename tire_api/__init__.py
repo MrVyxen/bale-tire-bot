@@ -9,6 +9,7 @@ __all__ = [
     "KalaNtswClient",
     "KavirTireClient",
     "MarketPriceClient",
+    "OilPriceClient",
     "SniperEngine",
 ]
 
@@ -20,6 +21,7 @@ _EXPORT_MAP = {
     "KalaNtswClient": "tire_api.kala_ntsw_client",
     "KavirTireClient": "tire_api.kavir_client",
     "MarketPriceClient": "tire_api.market_price_client",
+    "OilPriceClient": "tire_api.oil_price_client",
     "SniperEngine": "tire_api.sniper_engine",
 }
 

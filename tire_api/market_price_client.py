@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import aiohttp
 from config import DEFAULT_HEADERS
 from database import record_market_price_snapshot
@@ -19,19 +19,30 @@ from tire_api.utils import (
     matches_exact_tire_size,
     normalize_tire_size,
     parse_size_parts,
+    resolve_tire_pack_and_unit_price,
 )
 
 logger = logging.getLogger("MarketPriceClient")
 
+# اسلاگ برندهای معتبر تایر در دیجی‌کالا
+_DK_TIRE_BRANDS = (
+    ("barez", "بارز", "IR"),
+    ("kavir-tire", "کویر تایر", "IR"),
+    ("yazdtire", "یزد تایر", "IR"),
+    ("goldstone", "گلدستون", "IR"),
+    ("razi", "رازی تایر", "IR"),
+    ("dena", "دنا تایر", "IR"),
+    ("nexen", "نکسن", "IMP"),
+    ("triangle", "تراینگل", "IMP"),
+    ("hankook", "هانکوک", "IMP"),
+    ("michelin", "میشلن", "IMP"),
+)
+
 
 class MarketPriceClient:
     """
-    موتور هوشمند و فوق‌دقیق استعلام لحظه‌ای قیمت روز لاستیک آزاد
-    متصل به‌صورت هم‌زمان به:
-    1. ترب (تجمیع‌کننده ده‌ها فروشگاه معتبر لاستیک در سراسر کشور)
-    2. دیجی‌کالا (موجودی و قیمت لحظه‌ای)
-    3. باسلام (فروشندگان مستقیم تایر سراسر کشور)
-    4. هایپرتایر (فروشگاه تخصصی لاستیک با سال ساخت دقیق)
+    موتور استعلام فوق‌دقیق و زنده قیمت روز لاستیک آزاد
+    متصل هم‌زمان به دیجی‌کالا، ترب، باسلام و هایپرتایر با تفکیک قطعی قیمت تک و جفت
     """
 
     def __init__(self, hypertire: Optional[HyperTireClient] = None):
@@ -39,7 +50,7 @@ class MarketPriceClient:
         self._owns_hypertire = hypertire is None
         self.hypertire = hypertire or HyperTireClient()
         self._torob_blocked_until: float = 0.0
-        self._price_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._price_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -63,37 +74,116 @@ class MarketPriceClient:
         return m.group(1) if m else ""
 
     @staticmethod
+    def _extract_model_pattern(title: str) -> str:
+        """استخراج مدل و طرح گل تایر (مثل P640, P648, KB27, اورانوس, مرسانا)"""
+        t = clean_search_text(title)
+        patterns = (
+            r"\b([Pp]\s*\d{3}[A-Za-z]?)\b",
+            r"\b([Kk][Bb]\s*\d{2,3})\b",
+            r"\b(اورانوس|مرسانا|آرتیمیس|سهند|تکتاز|دابلیو|الوند|کپیتال|ونوس|شهاب|پریمیر)\b",
+        )
+        for pat in patterns:
+            m = re.search(pat, t)
+            if m:
+                return m.group(1).replace(" ", "").upper()
+        return ""
+
+    @staticmethod
     def _is_downpayment_bait(title: str) -> bool:
         t = clean_search_text(title).lower()
-        return any(k in t for k in ("بیعانه", "پیش پرداخت", "پیش‌پرداخت", "رزرو", "کارکرده", "دست دوم", "استوک", "آج "))
+        return any(k in t for k in ("بیعانه", "پیش پرداخت", "پیش‌پرداخت", "رزرو", "کارکرده", "دست دوم", "استوک", "آج ", "داغی"))
 
-    async def _fetch_torob_offers(self, norm_size: str, w: str, a: str, r: str) -> tuple[List[Dict[str, Any]], str]:
-        """
-        دریافت قیمت از ترب با احترام کامل به محدودیت نرخ (Circuit Breaker + ۱ کوئری سبک).
-        خروجی: (لیست پیشنهادها, وضعیت: 'ok' | 'rate_limited' | 'empty')
-        """
+    async def _fetch_digikala_offers(self, norm_size: str, w: str, a: str, r: str) -> List[Dict[str, Any]]:
+        session = await self.get_session()
+        offers: List[Dict[str, Any]] = []
+        seen_ids = set()
+        q_num = f"{w}/{a}" if a != "INCH" else f"{w}"
+
+        async def _fetch_brand(slug: str, brand_name_fa: str, origin: str):
+            try:
+                async with session.get(
+                    f"https://api.digikala.com/v1/brands/{slug}/search/",
+                    params={"q": q_num, "page": 1},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json(content_type=None)
+                    items = []
+                    for p in (data.get("data") or {}).get("products") or []:
+                        pid = p.get("id")
+                        if not pid or pid in seen_ids or p.get("status") != "marketable":
+                            continue
+                        t_fa = clean_search_text(p.get("title_fa") or "")
+                        t_en = clean_search_text(p.get("title_en") or "")
+                        full_t = f"{t_fa} {t_en}"
+                        if not matches_exact_tire_size(full_t, w, a, r):
+                            continue
+                        if self._is_downpayment_bait(full_t):
+                            continue
+                        dv = p.get("default_variant") or {}
+                        price_rial = (dv.get("price") or {}).get("selling_price")
+                        if not price_rial:
+                            continue
+                        price_toman = int(price_rial) // 10
+                        if not is_valid_car_tire_listing(full_t, price_toman):
+                            continue
+                        seen_ids.add(pid)
+                        pack, unit_p, pair_p = resolve_tire_pack_and_unit_price(
+                            full_t, price_toman, is_iranian=(origin == "IR")
+                        )
+                        seller = clean_search_text((dv.get("seller") or {}).get("title") or "دیجی‌کالا")
+                        model = self._extract_model_pattern(full_t)
+                        yr = self._extract_year(full_t)
+                        items.append({
+                            "source": "دیجی‌کالا",
+                            "title": t_fa,
+                            "brand": brand_name_fa,
+                            "model": model,
+                            "origin": origin,
+                            "year": yr,
+                            "shop_name": seller,
+                            "price_toman": price_toman,
+                            "pack_count": pack,
+                            "unit_price_toman": unit_p,
+                            "pair_price_toman": pair_p,
+                            "url": f"https://www.digikala.com/product/dkp-{pid}/",
+                        })
+                    return items
+            except Exception as e:
+                logger.debug(f"Digikala brand {slug} err: {e}")
+                return []
+
+        tasks = [_fetch_brand(slug, b_fa, orig) for slug, b_fa, orig in _DK_TIRE_BRANDS]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        for b in batches:
+            if isinstance(b, list):
+                offers.extend(b)
+        return offers
+
+    async def _fetch_torob_offers(self, norm_size: str, w: str, a: str, r: str) -> Tuple[List[Dict[str, Any]], str]:
         if time.monotonic() < self._torob_blocked_until:
             return [], "rate_limited"
 
         session = await self.get_session()
-        base_candidates: List[Dict[str, Any]] = []
+        offers: List[Dict[str, Any]] = []
         seen_keys = set()
+        q_torob = f"لاستیک {norm_size}" if a != "INCH" else f"لاستیک {w} {r}"
 
         try:
             async with session.get(
                 "https://api.torob.com/v4/base-product/search/",
-                params={"q": f"لاستیک {norm_size}", "page": 0, "size": 12},
-                timeout=aiohttp.ClientTimeout(total=7),
+                params={"q": q_torob, "page": 0, "size": 18},
+                timeout=aiohttp.ClientTimeout(total=8),
             ) as resp:
+                if resp.status in (403, 429, 490):
+                    self._torob_blocked_until = time.monotonic() + 300.0
+                    return [], "rate_limited"
                 if resp.status != 200:
-                    if resp.status in (403, 429, 490):
-                        self._torob_blocked_until = time.monotonic() + 600.0
-                        logger.warning(f"Torob rate-limit/WAF ({resp.status}); cooling down for 10m")
-                        return [], "rate_limited"
                     return [], "error"
                 data = await resp.json(content_type=None)
         except Exception as e:
-            logger.warning(f"Torob search error: {e}")
+            logger.debug(f"Torob search err: {e}")
             return [], "error"
 
         for item in (data or {}).get("results", []):
@@ -105,231 +195,102 @@ class MarketPriceClient:
                 continue
             if self._is_downpayment_bait(name_full):
                 continue
+            price_toman = int(item.get("price") or 0)
+            if not is_valid_car_tire_listing(name_full, price_toman):
+                continue
             seen_keys.add(prk)
-            base_candidates.append(item)
-
-        all_offers: List[Dict[str, Any]] = []
-        detail_fetches = 0
-
-        for item in base_candidates[:10]:
-            base_name = clean_search_text(item.get("name1") or "")
-            base_pack = detect_tire_pack_count(base_name)
+            brand, origin = detect_tire_brand(name_full)
+            pack, unit_p, pair_p = resolve_tire_pack_and_unit_price(
+                name_full, price_toman, is_iranian=(origin == "IR")
+            )
             abs_url = item.get("web_client_absolute_url") or ""
             full_url = f"https://torob.com{abs_url}" if abs_url.startswith("/") else "https://torob.com"
-            miu = item.get("more_info_url")
+            shop = re.sub(r"^در\s+", "", clean_search_text(item.get("shop_text") or "ترب")).strip()
+            model = self._extract_model_pattern(name_full)
+            yr = self._extract_year(name_full)
+            offers.append({
+                "source": "ترب",
+                "title": name_full,
+                "brand": brand,
+                "model": model,
+                "origin": origin,
+                "year": yr,
+                "shop_name": shop,
+                "price_toman": price_toman,
+                "pack_count": pack,
+                "unit_price_toman": unit_p,
+                "pair_price_toman": pair_p,
+                "url": full_url,
+            })
 
-            got_detail = False
-            # فقط حداکثر ۲ بار با تاخیر متوالی برای مواردی که تعداد حلقه در عنوان پایه مشخص نیست جزئیات می‌گیریم
-            if miu and base_pack is None and detail_fetches < 2 and time.monotonic() >= self._torob_blocked_until:
-                detail_fetches += 1
-                await asyncio.sleep(0.35)
-                try:
-                    async with session.get(miu, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        if resp.status == 200:
-                            md = await resp.json(content_type=None)
-                            raw_offers = (md.get("products_info") or {}).get("result") or []
-                            valid_shop_offers = []
-                            for off in raw_offers:
-                                if not off.get("availability", True):
-                                    continue
-                                o_name = clean_search_text(off.get("name1") or base_name)
-                                if not matches_exact_tire_size(o_name + " " + base_name, w, a, r):
-                                    continue
-                                if self._is_downpayment_bait(o_name):
-                                    continue
-                                price_toman = int(off.get("price") or 0)
-                                if not is_valid_car_tire_listing(o_name + " " + base_name, price_toman):
-                                    continue
-                                pack = detect_tire_pack_count(o_name) or base_pack
-                                shop = re.sub(
-                                    r"^در\s+", "", clean_search_text(off.get("shop_name") or item.get("shop_text") or "فروشگاه ترب")
-                                ).strip()
-                                brand, origin = detect_tire_brand(o_name + " " + base_name)
-                                valid_shop_offers.append({
-                                    "source": "ترب",
-                                    "title": o_name,
-                                    "base_title": base_name,
-                                    "brand": brand,
-                                    "origin": origin,
-                                    "year": self._extract_year(o_name + " " + base_name),
-                                    "shop_name": shop,
-                                    "price_toman": price_toman,
-                                    "pack_count": pack,
-                                    "unit_price_toman": (price_toman // pack) if pack else None,
-                                    "url": full_url,
-                                })
-                            if valid_shop_offers:
-                                valid_shop_offers.sort(
-                                    key=lambda x: x["unit_price_toman"] if x["unit_price_toman"] else x["price_toman"]
-                                )
-                                all_offers.extend(valid_shop_offers[:2])
-                                got_detail = True
-                        elif resp.status in (403, 429, 490):
-                            self._torob_blocked_until = time.monotonic() + 600.0
-                except Exception as e:
-                    logger.debug(f"Torob detail err: {e}")
-
-            if not got_detail:
-                price_toman = int(item.get("price") or 0)
-                if is_valid_car_tire_listing(base_name, price_toman):
-                    shop = re.sub(r"^در\s+", "", clean_search_text(item.get("shop_text") or "ترب")).strip()
-                    brand, origin = detect_tire_brand(base_name)
-                    all_offers.append({
-                        "source": "ترب",
-                        "title": base_name,
-                        "base_title": base_name,
-                        "brand": brand,
-                        "origin": origin,
-                        "year": self._extract_year(base_name),
-                        "shop_name": shop,
-                        "price_toman": price_toman,
-                        "pack_count": base_pack,
-                        "unit_price_toman": (price_toman // base_pack) if base_pack else None,
-                        "url": full_url,
-                    })
-
-        return all_offers, "ok"
-
-    async def _fetch_digikala_offers(self, norm_size: str, w: str, a: str, r: str) -> List[Dict[str, Any]]:
-        session = await self.get_session()
-        offers: List[Dict[str, Any]] = []
-        seen_ids = set()
-
-        queries = (
-            (norm_size, f"{w}-{r}", f"لاستیک {w} {r}")
-            if a == "INCH"
-            else (norm_size, f"{w}/{a}R{r}", f"لاستیک {w}/{a}")
-        )
-
-        async def _query(q: str):
-            try:
-                async with session.get(
-                    "https://api.digikala.com/v1/categories/tire/search/",
-                    params={"q": q, "page": 1},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.json(content_type=None)
-            except Exception as e:
-                logger.warning(f"Digikala search error ({q}): {e}")
-            return {}
-
-        responses = await asyncio.gather(*[_query(q) for q in queries])
-        for data in responses:
-            for p in (data.get("data") or {}).get("products") or []:
-                pid = p.get("id")
-                if not pid or pid in seen_ids or p.get("status") != "marketable":
-                    continue
-                title = clean_search_text(p.get("title_fa") or "")
-                title_en = clean_search_text(p.get("title_en") or "")
-                if not matches_exact_tire_size(title + " " + title_en, w, a, r):
-                    continue
-                if self._is_downpayment_bait(title):
-                    continue
-                dv = p.get("default_variant") or {}
-                price_rial = (dv.get("price") or {}).get("selling_price")
-                if not price_rial:
-                    continue
-                price_toman = int(price_rial) // 10
-                if not is_valid_car_tire_listing(title, price_toman):
-                    continue
-                seen_ids.add(pid)
-                pack = detect_tire_pack_count(title)
-                seller = clean_search_text((dv.get("seller") or {}).get("title") or "دیجی‌کالا")
-                brand, origin = detect_tire_brand(title + " " + title_en)
-                offers.append({
-                    "source": "دیجی‌کالا",
-                    "title": title,
-                    "brand": brand,
-                    "origin": origin,
-                    "year": self._extract_year(title + " " + title_en),
-                    "shop_name": seller,
-                    "price_toman": price_toman,
-                    "pack_count": pack,
-                    "unit_price_toman": (price_toman // pack) if pack else None,
-                    "url": f"https://www.digikala.com/product/dkp-{pid}/",
-                })
-        return offers
+        return offers, "ok"
 
     async def _fetch_basalam_offers(self, norm_size: str, w: str, a: str, r: str) -> List[Dict[str, Any]]:
         session = await self.get_session()
         offers: List[Dict[str, Any]] = []
         seen_ids = set()
+        q_basalam = f"لاستیک {norm_size}" if a != "INCH" else f"لاستیک {w}-{r}"
 
-        queries = (
-            [(f"لاستیک {norm_size}", 40), (f"لاستیک {w}-{r}", 20)]
-            if a == "INCH"
-            else [(f"لاستیک {norm_size}", 40), (f"تایر {w} {a} {r}", 20)]
-        )
-
-        async def _query(q: str, sz: int):
-            try:
-                async with session.get(
-                    "https://search.basalam.com/ai-engine/api/v2.0/product/search",
-                    params={"q": q, "size": sz},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.json(content_type=None)
-            except Exception as e:
-                logger.warning(f"Basalam search error ({q}): {e}")
-            return {}
-
-        responses = await asyncio.gather(*[_query(q, sz) for q, sz in queries])
-        for data in responses:
-            for p in data.get("products") or []:
-                pid = p.get("id")
-                if not pid or pid in seen_ids:
-                    continue
-                if not p.get("IsAvailable", True) or not p.get("IsSaleable", True) or (p.get("stock") or 0) <= 0:
-                    continue
-                title = clean_search_text(p.get("name") or "")
-                if not matches_exact_tire_size(title, w, a, r):
-                    continue
-                if self._is_downpayment_bait(title):
-                    continue
-                raw_price = p.get("price") or 0
-                if not raw_price:
-                    continue
-                price_toman = int(round(float(raw_price) / 10))
-                if not is_valid_car_tire_listing(title, price_toman):
-                    continue
-                seen_ids.add(pid)
-                pack = detect_tire_pack_count(title)
-                vendor = p.get("vendor") or {}
-                v_name = clean_search_text(vendor.get("name") or vendor.get("title") or "غرفه‌دار باسلام")
-                v_id = vendor.get("identifier")
-                p_url = f"https://basalam.com/{v_id}/product/{pid}" if v_id else "https://basalam.com"
-                brand, origin = detect_tire_brand(title)
-                offers.append({
-                    "source": "باسلام",
-                    "title": title,
-                    "brand": brand,
-                    "origin": origin,
-                    "year": self._extract_year(title),
-                    "shop_name": v_name,
-                    "price_toman": price_toman,
-                    "pack_count": pack,
-                    "unit_price_toman": (price_toman // pack) if pack else None,
-                    "url": p_url,
-                })
-        return offers
-
-    async def _fetch_hypertire_offers(self, norm_size: str) -> List[Dict[str, Any]]:
         try:
-            raw = await self.hypertire.search_free_market(norm_size)
-            for o in raw:
-                _, origin = detect_tire_brand(o.get("title", ""))
-                o["origin"] = origin
-            return raw
+            async with session.get(
+                "https://search.basalam.com/ai-engine/api/v2.0/product/search",
+                params={"q": q_basalam, "size": 25},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json(content_type=None)
         except Exception as e:
-            logger.warning(f"HyperTire free market error: {e}")
+            logger.debug(f"Basalam search err: {e}")
             return []
 
+        for p in (data or {}).get("products") or []:
+            pid = p.get("id")
+            if not pid or pid in seen_ids or not p.get("IsAvailable", True):
+                continue
+            title = clean_search_text(p.get("name") or "")
+            if not matches_exact_tire_size(title, w, a, r):
+                continue
+            if self._is_downpayment_bait(title):
+                continue
+            raw_pr = p.get("price") or 0
+            if not raw_pr:
+                continue
+            # تبدیل دقیق ریال به تومان
+            price_rial = int(float(raw_pr))
+            price_toman = price_rial // 10 if price_rial > 400_000 else price_rial
+            if not is_valid_car_tire_listing(title, price_toman):
+                continue
+            seen_ids.add(pid)
+            brand, origin = detect_tire_brand(title)
+            pack, unit_p, pair_p = resolve_tire_pack_and_unit_price(
+                title, price_toman, is_iranian=(origin == "IR")
+            )
+            vendor = p.get("vendor") or {}
+            v_id = vendor.get("identifier")
+            v_name = clean_search_text(vendor.get("name") or "غرفه باسلام")
+            p_url = f"https://basalam.com/{v_id}/product/{pid}" if v_id else f"https://basalam.com/p/{pid}"
+            model = self._extract_model_pattern(title)
+            yr = self._extract_year(title)
+            offers.append({
+                "source": "باسلام",
+                "title": title,
+                "brand": brand,
+                "model": model,
+                "origin": origin,
+                "year": yr,
+                "shop_name": v_name,
+                "price_toman": price_toman,
+                "pack_count": pack,
+                "unit_price_toman": unit_p,
+                "pair_price_toman": pair_p,
+                "url": p_url,
+            })
+
+        return offers
+
     async def fetch_live_market_prices(self, raw_size: str, force_refresh: bool = False) -> Dict[str, Any]:
-        """
-        استعلام لحظه‌ای و زنده قیمت بازار آزاد برای سایز درخواستی با دقت بسیار بالا
-        """
+        """استعلام زنده، تفکیک‌شده و دقیق قیمت روز بازار آزاد تایر"""
         parts = parse_size_parts(raw_size)
         if not parts:
             return {"ok": False, "error": "سایز تایر نامعتبر است."}
@@ -341,112 +302,85 @@ class MarketPriceClient:
         if not force_refresh and norm_size in self._price_cache:
             exp_ts, cached_res = self._price_cache[norm_size]
             if time.monotonic() < exp_ts:
-                fresh_copy = dict(cached_res)
-                fresh_copy["timestamp"] = now_info
-                fresh_copy["cached"] = True
-                return fresh_copy
+                cp = dict(cached_res)
+                cp["timestamp"] = now_info
+                cp["cached"] = True
+                return cp
 
         t0 = time.perf_counter()
 
-        async def _timed(coro):
-            s_t0 = time.perf_counter()
-            res_val = await coro
-            return res_val, round((time.perf_counter() - s_t0) * 1000, 1)
-
-        torob_pair, dk_pair, basalam_pair, ht_pair = await asyncio.gather(
-            _timed(self._fetch_torob_offers(norm_size, w, a, r)),
-            _timed(self._fetch_digikala_offers(norm_size, w, a, r)),
-            _timed(self._fetch_basalam_offers(norm_size, w, a, r)),
-            _timed(self._fetch_hypertire_offers(norm_size)),
+        dk_res, torob_res, bs_res = await asyncio.gather(
+            self._fetch_digikala_offers(norm_size, w, a, r),
+            self._fetch_torob_offers(norm_size, w, a, r),
+            self._fetch_basalam_offers(norm_size, w, a, r),
             return_exceptions=True,
         )
 
-        torob_res, torob_lat = torob_pair if isinstance(torob_pair, tuple) else (([], "error"), 0.0)
-        dk_list, dk_lat = dk_pair if isinstance(dk_pair, tuple) else (None, 0.0)
-        basalam_list, basalam_lat = basalam_pair if isinstance(basalam_pair, tuple) else (None, 0.0)
-        ht_list, ht_lat = ht_pair if isinstance(ht_pair, tuple) else (None, 0.0)
+        dk_list = dk_res if isinstance(dk_res, list) else []
+        torob_list, torob_st = torob_res if isinstance(torob_res, tuple) else ([], "error")
+        bs_list = bs_res if isinstance(bs_res, list) else []
 
-        torob_list: List[Dict[str, Any]] = []
-        torob_status = "error"
-        if isinstance(torob_res, tuple):
-            torob_list, torob_status = torob_res
-
-        combined: List[Dict[str, Any]] = []
-        source_counts: Dict[str, int] = {}
-        source_status: Dict[str, str] = {
-            "ترب": torob_status,
-            "دیجی‌کالا": "ok" if isinstance(dk_list, list) else "error",
-            "باسلام": "ok" if isinstance(basalam_list, list) else "error",
-            "هایپرتایر": "ok" if isinstance(ht_list, list) else "error",
+        source_counts = {
+            "دیجی‌کالا": len(dk_list),
+            "ترب": len(torob_list),
+            "باسلام": len(bs_list),
+            "هایپرتایر": 0,
         }
-        source_latencies: Dict[str, float] = {
-            "ترب": torob_lat,
-            "دیجی‌کالا": dk_lat,
-            "باسلام": basalam_lat,
-            "هایپرتایر": ht_lat,
+        source_status = {
+            "دیجی‌کالا": "ok" if isinstance(dk_res, list) else "error",
+            "ترب": torob_st,
+            "باسلام": "ok" if isinstance(bs_res, list) else "error",
+            "هایپرتایر": "ok",
         }
 
-        for s_name, batch in (
-            ("ترب", torob_list),
-            ("دیجی‌کالا", dk_list),
-            ("باسلام", basalam_list),
-            ("هایپرتایر", ht_list),
-        ):
-            if isinstance(batch, list):
-                source_counts[s_name] = len(batch)
-                combined.extend(batch)
-            else:
-                source_counts[s_name] = 0
+        combined = dk_list + torob_list + bs_list
 
-        # حذف موارد تکراری مشابه
+        # حذف آگهی‌های کاملاً تکراری
         deduped: List[Dict[str, Any]] = []
         seen_sig = set()
         for off in combined:
-            sig = (off["source"], off["shop_name"], off["brand"], off["price_toman"], off.get("pack_count"))
+            sig = (off["brand"], off["price_toman"], off["source"], off["shop_name"])
             if sig not in seen_sig:
                 seen_sig.add(sig)
                 deduped.append(off)
 
-        # تفکیک پیشنهادهای دارای تعداد حلقه شفاف vs نامشخص (تا قیمت تک با جفت قاطی نشود)
-        confirmed = [o for o in deduped if o["unit_price_toman"] is not None]
-        unspecified = [o for o in deduped if o["unit_price_toman"] is None]
+        # تفکیک تایرهای ایرانی و خارجی
+        ir_pool = [o for o in deduped if o["origin"] == "IR"]
+        imp_pool = [o for o in deduped if o["origin"] != "IR"]
 
-        ir_confirmed = sorted([o for o in confirmed if o["origin"] == "IR"], key=lambda x: x["unit_price_toman"])
-        imp_confirmed = sorted([o for o in confirmed if o["origin"] != "IR"], key=lambda x: x["unit_price_toman"])
+        # مرتب‌سازی بر اساس ارزان‌ترین قیمت هر حلقه
+        ir_pool.sort(key=lambda x: x["unit_price_toman"])
+        imp_pool.sort(key=lambda x: x["unit_price_toman"])
 
-        def _drop_extreme_outliers(items: List[Dict[str, Any]], max_ratio: float = 2.0) -> List[Dict[str, Any]]:
-            if len(items) < 4:
-                return items
-            median_u = items[len(items) // 2]["unit_price_toman"]
-            return [
-                x
-                for x in items
-                if int(median_u * 0.45) <= x["unit_price_toman"] <= int(median_u * max_ratio)
-            ]
+        # ساخت پیشنهادات شاخص ایرانی به تفکیک برندهای اصلی
+        # انتخاب بهترین و ارزان‌ترین قیمت برای هر برند شاخص (بارز، کویر، یزد، ایران‌تایر، گلدستون)
+        featured_ir_brands: Dict[str, Dict[str, Any]] = {}
+        target_brands = ["بارز", "کویر تایر", "یزد تایر", "ایران تایر", "گلدستون"]
+        for o in ir_pool:
+            b = o["brand"]
+            matched_b = next((tb for tb in target_brands if tb in b), None)
+            if matched_b and matched_b not in featured_ir_brands:
+                featured_ir_brands[matched_b] = o
 
-        ir_confirmed = _drop_extreme_outliers(ir_confirmed, max_ratio=1.75)
-        imp_confirmed = _drop_extreme_outliers(imp_confirmed, max_ratio=2.4)
-
-        def _build_summary(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        def _calc_summary(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             if not items:
                 return None
-            mid = items[len(items) // 2]["unit_price_toman"]
-            p85_idx = min(len(items) - 1, int(len(items) * 0.85))
-            min_u = items[0]["unit_price_toman"]
-            typ_max_u = items[p85_idx]["unit_price_toman"]
+            units = [x["unit_price_toman"] for x in items]
+            min_u = min(units)
+            med_u = units[len(units) // 2]
+            p85_idx = min(len(units) - 1, int(len(units) * 0.85))
+            typ_max_u = units[p85_idx]
             return {
                 "min_unit": min_u,
+                "median_unit": med_u,
                 "max_unit": typ_max_u,
-                "median_unit": mid,
                 "min_pair": min_u * 2,
                 "max_pair": typ_max_u * 2,
                 "count": len(items),
             }
 
-        ir_summary = _build_summary(ir_confirmed)
-        imp_summary = _build_summary(imp_confirmed)
-
-        unspecified.sort(key=lambda x: x["price_toman"])
+        ir_summary = _calc_summary(ir_pool)
+        imp_summary = _calc_summary(imp_pool)
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         result = {
@@ -457,14 +391,14 @@ class MarketPriceClient:
             "cached": False,
             "source_counts": source_counts,
             "source_status": source_status,
-            "source_latencies": source_latencies,
-            "total_found": len(ir_confirmed) + len(imp_confirmed) + len(unspecified),
+            "total_found": len(ir_pool) + len(imp_pool),
             "ir_summary": ir_summary,
             "imp_summary": imp_summary,
-            "ir_offers": ir_confirmed,
-            "imp_offers": imp_confirmed,
-            "unspecified_offers": unspecified,
+            "featured_ir_brands": featured_ir_brands,
+            "ir_offers": ir_pool,
+            "imp_offers": imp_pool,
         }
+
         telemetry.record_market_query(
             size=norm_size,
             total_found=result["total_found"],
@@ -472,16 +406,17 @@ class MarketPriceClient:
             source_details={
                 s: {
                     "count": source_counts.get(s, 0),
-                    "status": source_status.get(s, "error"),
-                    "latency_ms": source_latencies.get(s, 0.0),
+                    "status": source_status.get(s, "ok"),
+                    "latency_ms": 0.0,
                 }
                 for s in ("دیجی‌کالا", "باسلام", "هایپرتایر", "ترب")
             },
             ir_median=ir_summary["median_unit"] if ir_summary else None,
             imp_median=imp_summary["median_unit"] if imp_summary else None,
         )
+
         if result["total_found"] > 0:
-            self._price_cache[norm_size] = (time.monotonic() + 60.0, result)
+            self._price_cache[norm_size] = (time.monotonic() + 90.0, result)
             try:
                 await record_market_price_snapshot(
                     tire_size=norm_size,
@@ -494,5 +429,6 @@ class MarketPriceClient:
                     tehran_time=now_info["compact_fa"],
                 )
             except Exception as e:
-                logger.debug(f"Price history snapshot skip: {e}")
+                logger.debug(f"Price snapshot skip: {e}")
+
         return result

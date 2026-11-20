@@ -243,12 +243,21 @@ _BAD_KEYWORDS = (
     "رینگ اسپرت",
     "رینگ آلومینیومی",
     "رینگ فولادی",
+    "اکتان",
+    "مکمل",
+    "انژکتور شور",
+    "تسمه",
+    "لنت",
+    "داغی",
+    "اجرت",
+    "نصب",
 )
 
 
 def is_valid_car_tire_listing(title: str, price_toman: int) -> bool:
-    """حذف لوازم جانبی غیرمرتبط و قیمت‌های نامعتبر/فیک"""
-    if price_toman < 1_500_000 or price_toman > 350_000_000:
+    """حذف لوازم جانبی غیرمرتبط و قیمت‌های نامعتبر/فیک بازار آزاد"""
+    # حداقل قیمت معتبر یک حلقه تایر سواری در بازار آزاد ۱.۸ میلیون تومان و سقف ۲۰۰ میلیون تومان است
+    if price_toman < 1_800_000 or price_toman > 200_000_000:
         return False
     t = clean_search_text(title).lower()
     for bad in _BAD_KEYWORDS:
@@ -260,7 +269,7 @@ def is_valid_car_tire_listing(title: str, price_toman: int) -> bool:
 def detect_tire_pack_count(title: str) -> Optional[int]:
     """
     تشخیص دقیق تعداد حلقه درج‌شده در عنوان محصول:
-    خروجی: 1، 2، 4 یا None (در صورتی که فروشنده در عنوان تعداد را ذکر نکرده باشد)
+    خروجی: 1، 2، 4 یا None
     """
     t = clean_search_text(title)
     # بررسی صریح ۴ حلقه یا دو جفت
@@ -277,12 +286,13 @@ def detect_tire_pack_count(title: str) -> Optional[int]:
         re.search(r"(?:2|دو)\s*(?:حلقه|عددی?|تایی|تا)", t)
         or re.search(r"تعداد\s*(?::|\s)\s*2(?!\d)", t)
         or re.search(r"\bجفت(?:ی)?\b", t)
+        or "بسته 2" in t
+        or "بسته ۲" in t
         or "(جفت" in t
         or "جفت)" in t
-        or "جفتی" in t
     ):
         return 2
-    # بررسی صریح تک حلقه / هر حلقه
+    # بررسی صریح تک حلقه / ۱ حلقه
     if (
         re.search(r"(?:1|یک)\s*(?:حلقه|عددی?)", t)
         or "تک حلقه" in t
@@ -290,9 +300,45 @@ def detect_tire_pack_count(title: str) -> Optional[int]:
         or "هر حلقه" in t
         or "تکی" in t
         or "(تک)" in t
+        or "بسته 1" in t
+        or "بسته ۱" in t
     ):
         return 1
     return None
+
+
+def resolve_tire_pack_and_unit_price(
+    title: str, price_toman: int, is_iranian: bool = True
+) -> Tuple[int, int, int]:
+    """
+    محاسبه قطعی و شفاف تعداد حلقه، قیمت هر حلقه و قیمت یک جفت (۲ حلقه)
+    خروجی: (pack_count, unit_price_toman, pair_price_toman)
+    """
+    pack = detect_tire_pack_count(title)
+    if pack == 4:
+        unit = price_toman // 4
+        return 4, unit, unit * 2
+    if pack == 2:
+        unit = price_toman // 2
+        return 2, unit, price_toman
+    if pack == 1:
+        return 1, price_toman, price_toman * 2
+
+    # در صورتی که فروشنده در عنوان تعداد را ننوشته باشد:
+    # برای تایرهای سواری ایرانی در بازار آزاد (قیمت جفت معمولاً بالای ۱۲ میلیون تومان است)
+    if is_iranian:
+        if price_toman >= 12_000_000:
+            # قیمت برای جفت (۲ حلقه) است
+            return 2, price_toman // 2, price_toman
+        else:
+            # قیمت برای یک حلقه است
+            return 1, price_toman, price_toman * 2
+    else:
+        # تایرهای خارجی اگر بالای ۲۲ میلیون باشد معمولاً جفت است
+        if price_toman >= 22_000_000:
+            return 2, price_toman // 2, price_toman
+        else:
+            return 1, price_toman, price_toman * 2
 
 
 def detect_tire_brand(title: str) -> Tuple[str, str]:

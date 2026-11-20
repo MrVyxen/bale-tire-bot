@@ -758,6 +758,20 @@ class OilPriceClient:
                 "count": len(items),
             }
 
+        # انتخاب بهترین و ارزان‌ترین قیمت برای هر برند شاخص ایرانی (بهران، ایرانول، اسپیدی، پارس، کاسپین)
+        featured_ir: Dict[str, Dict[str, Any]] = {}
+        for brand_key in ("بهران", "ایرانول", "اسپیدی", "نفت پارس", "کاسپین", "بهتام"):
+            match = next((o for o in ir_offers if brand_key in o["brand"] or brand_key in o["title"]), None)
+            if match:
+                featured_ir[brand_key] = match
+
+        # انتخاب بهترین برندهای خارجی معتبر (کاسترول، توتال، لیکومولی، موتول، ادینول)
+        featured_imp: Dict[str, Dict[str, Any]] = {}
+        for brand_key in ("کاسترول", "توتال", "لیکومولی", "شل", "ادینول", "هیوندای"):
+            match = next((o for o in imp_offers if brand_key in o["brand"] or brand_key in o["title"]), None)
+            if match:
+                featured_imp[brand_key] = match
+
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         result = {
             "ok": True,
@@ -773,9 +787,12 @@ class OilPriceClient:
             "total_found": len(ir_offers) + len(imp_offers),
             "ir_summary": _summary(ir_offers),
             "imp_summary": _summary(imp_offers),
+            "featured_ir_brands": featured_ir,
+            "featured_imp_brands": featured_imp,
             "ir_offers": ir_offers,
             "imp_offers": imp_offers,
         }
         if result["total_found"] > 0:
             self._cache[code] = (time.monotonic() + 60.0, result)
+        return result
         return result
